@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../models/chat.dart';
 import '../models/message.dart';
@@ -6,6 +5,11 @@ import '../services/api.dart';
 import '../services/ws.dart';
 
 const int messagesPageSize = 50;
+
+/// Состояние WebSocket открытого чата (дефект №20): раньше статус хранился
+/// как строка 'connected'/'connecting'/'disconnected' — опечатки в сравнениях
+/// не ловились типами. Теперь enum, как и ChatType в моделях.
+enum WsStatus { connecting, connected, disconnected }
 
 class ChatState extends ChangeNotifier {
   final Api _api = Api();
@@ -21,9 +25,9 @@ class ChatState extends ChangeNotifier {
   bool isLoadingHistory = false;
 
   WsClient? _chatSocket;
-  String? _wsStatus; // 'connected' | 'connecting' | 'disconnected'
+  WsStatus? _wsStatus; // null — сокет чата ещё не открывался
 
-  String? get wsStatus => _wsStatus;
+  WsStatus? get wsStatus => _wsStatus;
 
   ChatListItem? get selectedChat {
     if (selectedChatId == null) return null;
@@ -170,22 +174,6 @@ class ChatState extends ChangeNotifier {
     }
   }
 
-  /// Удаляет чат на сервере и из локального списка.
-  ///
-  /// Метод есть, но в UI не вызывается — см. раздел 8 AGENTS.md «Что не реализовано».
-  Future<void> deleteChat(String chatId) async {
-    await _api.deleteChat(chatId);
-    removeChat(chatId);
-  }
-
-  /// Переименовывает чат на сервере и обновляет локальное состояние.
-  ///
-  /// Метод есть, но в UI не вызывается — см. раздел 8 AGENTS.md.
-  Future<void> renameChat(String chatId, String name) async {
-    final detail = await _api.renameChat(chatId, name);
-    applyRename(chatId, detail.name ?? name);
-  }
-
   /// Обновляет имя чата в локальном списке и деталях.
   ///
   /// Если чат не найден в списке (удалили из другого места), перезагружает весь список.
@@ -242,12 +230,12 @@ class ChatState extends ChangeNotifier {
 
   /// Открывает WebSocket для конкретного чата.
   ///
-  /// Закрывает предыдущий сокет (если был), устанавливает статус 'connecting',
+  /// Закрывает предыдущий сокет (если был), ставит WsStatus.connecting,
   /// создаёт новый WsClient с обработчиками событий и подключается к серверу.
-  /// Статус 'connected' будет установлен в колбэке onOpen, когда handshake пройдёт успешно.
+  /// Статус connected будет установлен в колбэке onOpen, когда handshake пройдёт успешно.
   void _openChatSocket(String chatId) {
     _closeChatSocket();
-    _wsStatus = 'connecting';
+    _wsStatus = WsStatus.connecting;
     notifyListeners();
     final socket = WsClient(
       path: 'chat/$chatId/',
@@ -260,13 +248,13 @@ class ChatState extends ChangeNotifier {
     socket.connect();
   }
 
-  /// Закрывает текущий WebSocket чата и сбрасывает статус в 'disconnected'.
+  /// Закрывает текущий WebSocket чата и сбрасывает статус в WsStatus.disconnected.
   ///
   /// Вызывается при смене чата, закрытии чата или уничтожении состояния.
   void _closeChatSocket() {
     _chatSocket?.close();
     _chatSocket = null;
-    _wsStatus = 'disconnected';
+    _wsStatus = WsStatus.disconnected;
   }
 
   /// Обрабатывает кадры WebSocket канала чата.
@@ -319,7 +307,7 @@ class ChatState extends ChangeNotifier {
   /// При кодах 4003 (исключён из чата) или 4004 (чат удалён) удаляет чат из списка
   /// и закрывает его, если он был открыт. См. раздел 5 AGENTS.md «Коды закрытия».
   void _handleChatClose(int? code) {
-    _wsStatus = 'disconnected';
+    _wsStatus = WsStatus.disconnected;
     if (code == 4003 || code == 4004) {
       if (selectedChatId != null) removeChat(selectedChatId!);
     }
@@ -339,12 +327,12 @@ class ChatState extends ChangeNotifier {
     await loadChats();
   }
 
-  /// Устанавливает статус WebSocket в 'connected'.
+  /// Устанавливает статус WebSocket в WsStatus.connected.
   ///
   /// Вызывается из WsClient.onOpen после успешного handshake. Раньше этот метод не вызывался
   /// ниоткуда (дефект №3), теперь он подключён в _openChatSocket через колбэк onOpen.
   void setConnected() {
-    _wsStatus = 'connected';
+    _wsStatus = WsStatus.connected;
     notifyListeners();
   }
 

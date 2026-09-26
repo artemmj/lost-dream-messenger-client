@@ -1,11 +1,11 @@
 {
-    "name": "lost_dream_messenger_android",
-    "short_name": "lost_dream_messenger_android",
+    "name": "Lost Dream Messenger",
+    "short_name": "Lost Dream",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
     "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "description": "Кроссплатформенный Flutter-клиент мессенджера Lost Dream Messenger.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

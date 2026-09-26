@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../models/chat.dart';
 import '../models/message.dart';
 import '../state/chat_state.dart';
 import '../state/auth_state.dart';
@@ -70,16 +71,21 @@ class _ChatScreenState extends State<ChatScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(chat.selectedChat?.displayName ?? ''),
+            // Статус WebSocket — enum WsStatus (дефект №20), сравнение строк больше не нужно
             if (chat.wsStatus != null)
               Text(
-                chat.wsStatus == 'connected' ? 'на связи' :
-                chat.wsStatus == 'connecting' ? 'подключение...' : 'нет соединения',
+                switch (chat.wsStatus!) {
+                  WsStatus.connected => 'на связи',
+                  WsStatus.connecting => 'подключение...',
+                  WsStatus.disconnected => 'нет соединения',
+                },
                 style: const TextStyle(fontSize: 11),
               ),
           ],
         ),
         actions: [
-          if (detail?.type.name == 'group')
+          // Тип чата сравниваем с enum ChatType, а не со строкой name (дефект №20)
+          if (detail?.type == ChatType.group)
             IconButton(
               icon: const Icon(Icons.people),
               onPressed: () => Navigator.push(context, MaterialPageRoute(

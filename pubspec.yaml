@@ -1,5 +1,5 @@
-name: lost_dream_messenger_android
-description: "A new Flutter project."
+name: lost_dream_messenger_client
+description: "Кроссплатформенный Flutter-клиент мессенджера Lost Dream Messenger."
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -14,7 +14,6 @@ dependencies:
   web_socket_channel: ^3.0.0   # WS
   provider: ^6.1.0             # управление состоянием
   shared_preferences: ^2.2.0   # хранение JWT
-  intl: ^0.20.3                # форматирование дат
   
 dev_dependencies:
   flutter_test:
@@ -23,5 +22,3 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
-
-

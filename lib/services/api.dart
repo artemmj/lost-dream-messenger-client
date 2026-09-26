@@ -199,17 +199,6 @@ class Api {
     return ChatDetail.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
   }
 
-  Future<ChatDetail> renameChat(String chatId, String name) async {
-    final res = await _request('PATCH', '/chats/$chatId/', body: {'name': name});
-    if (res.statusCode != 200) throw ApiException(res.statusCode, _extractError(res));
-    return ChatDetail.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
-  }
-
-  Future<void> deleteChat(String chatId) async {
-    final res = await _request('DELETE', '/chats/$chatId/');
-    if (res.statusCode != 204) throw ApiException(res.statusCode, _extractError(res));
-  }
-
   Future<List<Message>> messages(String chatId, {int page = 1}) async {
     final res = await _request('GET', '/chats/$chatId/messages/?page=$page');
     if (res.statusCode != 200) throw ApiException(res.statusCode, _extractError(res));
@@ -226,12 +215,6 @@ class Api {
   Future<void> markRead(String chatId) async {
     final res = await _request('POST', '/chats/$chatId/read/');
     if (res.statusCode != 200) throw ApiException(res.statusCode, _extractError(res));
-  }
-
-  Future<void> addMember(String chatId, String userId) async {
-    final res = await _request('POST', '/chats/$chatId/add-member/',
-        body: {'user_id': userId});
-    if (res.statusCode != 201) throw ApiException(res.statusCode, _extractError(res));
   }
 
   Future<void> removeMember(String chatId, String userId) async {

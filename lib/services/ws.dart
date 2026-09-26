@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 // IOWebSocketChannel нужен для нативных платформ (Android/iOS/macOS/Linux/Windows),
 // чтобы передать заголовок Origin в handshake. На web-платформе заголовки WS недоступны.
 import 'package:web_socket_channel/io.dart';
@@ -35,7 +36,15 @@ class WsClient {
   StreamSubscription? _sub;
   Timer? _retryTimer;
   bool _closedByUser = false;
-  bool _hadConnection = false;
+
+  // Открыт ли канал на самом деле: _channel создаётся до завершения handshake,
+  // поэтому «канал != null» не означает «можно слать» (см. дефект с исчезающими
+  // отправками: sendMessage писал в мёртвый сокет и не уходил в REST-фолбэк).
+  bool _isOpen = false;
+
+  // Счётчик неудачных подключений для экспоненциального backoff'а
+  int _retryCount = 0;
+  final math.Random _rng = math.Random();
 
   WsClient({
     required this.path,
@@ -78,12 +87,20 @@ class WsClient {
       // ready завершается, когда handshake прошёл и соединение открыто
       await _channel!.ready;
 
-      // Помечаем, что было успешное подключение (нужно для отличия первого подключения от реконнекта)
-      _hadConnection = true;
+      // Handshake успех: только с этого момента соединение реально открыто
+      // и в него можно писать (см. флаг _isOpen).
+      _isOpen = true;
+      _retryCount = 0; // backoff сбрасывается после успешного подключения
 
-      // Если это реконнект (был разрыв и сработал таймер), уведомляем подписчика,
-      // чтобы он перезагрузил состояние чата и список чатов
-      if (_hadConnection && _retryTimer != null) {
+      // onOpen вызываем ПЕРЕД onReconnect: UI сначала получает статус
+      // 'connected' (setConnected в ChatState), и только потом идёт
+      // перезагрузка истории. Раньше onOpen не вызывался вообще — шапка
+      // чата вечно показывала «подключение...» даже при живом сокете.
+      onOpen?.call();
+
+      // Если это реконнект (первое подключение идёт с _retryTimer == null),
+      // уведомляем подписчика, чтобы он перезагрузил состояние чата и список чатов
+      if (_retryTimer != null) {
         onReconnect?.call();
       }
 
@@ -104,7 +121,12 @@ class WsClient {
         onError: (_) => _handleClose(_channel?.closeCode),
       );
     } catch (_) {
-      // Ошибка подключения (403, сеть недоступна, DNS) — планируем реконнект
+      // Ошибка handshake (403, сеть, отказ 4001/4003/4029 ДО accept — кода
+      // закрытия клиент при этом не видит, только сорванный upgrade).
+      // Канал обнуляем, чтобы send() не написал в мёртвый сокет, и уходим
+      // в реконнект с backoff'ом (см. _scheduleReconnect).
+      _isOpen = false;
+      _channel = null;
       _scheduleReconnect();
     }
   }
@@ -114,8 +136,10 @@ class WsClient {
   /// Отменяет подписку на поток, обнуляет канал и уведомляет подписчика о коде закрытия.
   /// Если соединение закрыто пользователем (_closedByUser) или код входит в noReconnectCodes,
   /// реконнект не планируется — это окончательное закрытие.
-  /// В остальных случаях (обрыв сети, таймаут сервера) через 2 секунды будет попытка переподключения.
+  /// В остальных случаях (обрыв сети, таймаут сервера) переподключение откладывается
+  /// по экспоненциальному backoff'у — см. _scheduleReconnect.
   void _handleClose(int? code) {
+    _isOpen = false;
     _sub?.cancel();
     _sub = null;
     _channel = null;
@@ -127,42 +151,60 @@ class WsClient {
     if (_closedByUser) return;
     if (code != null && noReconnectCodes.contains(code)) return;
 
-    // Во всех остальных случаях пробуем переподключиться через фиксированный интервал
+    // Во всех остальных случаях планируем переподключение с растущей задержкой
     _scheduleReconnect();
   }
 
-  /// Планирует повторное подключение через 2 секунды.
+  /// Планирует повторное подключение с экспоненциальным backoff'ом:
+  /// 1, 2, 4, 8, 16, 32, 60 с (далее потолок 60 с) плюс джиттер ±30%,
+  /// чтобы два клиента не ретраили синхронно.
   ///
-  /// Фиксированная задержка выбрана для простоты; в продакшене нужен экспоненциальный backoff.
-  /// Таймер отменяется при явном close() или новом подключении.
+  /// Почему не фиксированные 2 с (как было раньше): у бэкенда лимит
+  /// подключений 20/мин на пользователя (messenger/ratelimit.py CONNECT_LIMITER),
+  /// а отказ 4029 происходит до accept — клиент не видит код закрытия,
+  /// не попадает в noReconnectCodes и ретраит вечно. Фиксированные 2 с = до
+  /// 30 попыток/мин: кратковременный обрыв сети запускал петлю, которой
+  /// клиент сам блокировал себе переподключение (симптом: вечно «подключение...»,
+  /// не приходят сообщения и бейджи). Растущая задержка держит частоту
+  /// попыток ниже лимита, и соединение восстанавливается само.
   void _scheduleReconnect() {
     _retryTimer?.cancel();
-    _retryTimer = Timer(const Duration(seconds: 2), connect);
+    const stepsS = [1, 2, 4, 8, 16, 32, 60];
+    final baseS = stepsS[math.min(_retryCount, stepsS.length - 1)];
+    _retryCount++;
+    final jitter = 0.7 + _rng.nextDouble() * 0.6; // 0.7x .. 1.3x
+    _retryTimer = Timer(
+      Duration(milliseconds: (baseS * 1000 * jitter).round()),
+      connect,
+    );
   }
 
   /// Отправляет JSON-кадр в WebSocket.
   ///
   /// Клиент отправляет только {"text": "..."} — бэкенд сам добавит id, chat, sender, created_at, is_read
   /// и вернёт полное сообщение обратно через broadcast-группу чата (эхо).
-  /// Если канал ещё не открыт (_channel == null), бросает StateError.
+  /// Если канал не открыт — бросает StateError: вызывающий (ChatState.sendMessage)
+  /// переводит отправку на REST-фолбэк, а не пишет в мёртвый сокет.
   void send(Map<String, dynamic> payload) {
-    if (_channel != null) {
-      _channel!.sink.add(jsonEncode(payload));
-    } else {
+    if (_channel == null || !_isOpen) {
       throw StateError('Socket not connected');
     }
+    _channel!.sink.add(jsonEncode(payload));
   }
 
-  /// Возвращает true, если WebSocket-канал создан (но не обязательно открыт).
+  /// True только когда handshake завершён и в канал реально можно писать.
   ///
-  /// Для точной проверки использования смотрите wsStatus в ChatState.
-  bool get isConnected => _channel != null;
+  /// Раньше возвращал `_channel != null`, но канал создаётся до handshake —
+  /// из-за этого sendMessage считал сокет живым во время переподключения
+  /// и сообщения терялись (не срабатывал REST-фолбэк).
+  bool get isConnected => _isOpen;
 
   /// Закрывает соединение нормально (код 1000) и отменяет все таймеры реконнекта.
   ///
   /// После этого WsClient можно выбросить — повторное использование невозможно.
   void close() {
     _closedByUser = true;
+    _isOpen = false;
     _retryTimer?.cancel();
     _sub?.cancel();
     _channel?.sink.close(ws_status.normalClosure);

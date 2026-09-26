@@ -16,7 +16,13 @@ class _NewChatScreenState extends State<NewChatScreen> {
   final _search = TextEditingController();
   final _groupName = TextEditingController();
   List<User> _results = [];
-  final Set<User> _selected = {};
+
+  // Выбор участников храним по id пользователя (дефект №7): каждый поиск
+  // создаёт новые экземпляры User, а равенство у модели не переопределено,
+  // поэтому Set<User> не узнавал «того же человека» — чекбоксы сбрасывались,
+  // а в member_ids попадали дубли (бэкенд отвечал 400).
+  // Map даёт стабильный ключ (id), дедупликацию и нужное для чипов имя.
+  final Map<String, User> _selected = {};
   bool _isGroup = false;
   
   // Timer для дебаунса поиска — отменяет предыдущие запросы (дефект №8)
@@ -57,6 +63,17 @@ class _NewChatScreenState extends State<NewChatScreen> {
     });
   }
 
+  /// Добавляет или снимает пользователя из выбора (ключ — id, см. дефект №7).
+  void _toggleSelected(User u) {
+    setState(() {
+      if (_selected.containsKey(u.id)) {
+        _selected.remove(u.id);
+      } else {
+        _selected[u.id] = u;
+      }
+    });
+  }
+
   /// Создаёт личный чат с пользователем и открывает его.
   ///
   /// После создания загружаем список чатов, выбираем новый чат (открывает сокет),
@@ -92,7 +109,8 @@ class _NewChatScreenState extends State<NewChatScreen> {
     try {
       final detail = await Api().createGroupChat(
         name: _groupName.text.trim(),
-        memberIds: _selected.map((u) => u.id).toList(),
+        // Ключи Map — id пользователей; дубликаты исключены самой структурой
+        memberIds: _selected.keys.toList(),
       );
       final chat = context.read<ChatState>();
       await chat.loadChats();
@@ -151,9 +169,9 @@ class _NewChatScreenState extends State<NewChatScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Wrap(
                 spacing: 6,
-                children: _selected.map((u) => Chip(
+                children: _selected.values.map((u) => Chip(
                   label: Text(u.displayName),
-                  onDeleted: () => setState(() => _selected.remove(u)),
+                  onDeleted: () => setState(() => _selected.remove(u.id)),
                 )).toList(),
               ),
             ),
@@ -167,24 +185,12 @@ class _NewChatScreenState extends State<NewChatScreen> {
                   subtitle: Text(u.phone),
                   trailing: _isGroup
                       ? Checkbox(
-                          value: _selected.contains(u),
-                          onChanged: (_) => setState(() {
-                            if (_selected.contains(u)) {
-                              _selected.remove(u);
-                            } else {
-                              _selected.add(u);
-                            }
-                          }),
+                          value: _selected.containsKey(u.id),
+                          onChanged: (_) => _toggleSelected(u),
                         )
                       : null,
                   onTap: _isGroup
-                      ? () => setState(() {
-                            if (_selected.contains(u)) {
-                              _selected.remove(u);
-                            } else {
-                              _selected.add(u);
-                            }
-                          })
+                      ? () => _toggleSelected(u)
                       : () => _createPrivate(u),
                 );
               },
