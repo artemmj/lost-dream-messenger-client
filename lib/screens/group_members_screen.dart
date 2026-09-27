@@ -17,7 +17,7 @@ class GroupMembersScreen extends StatefulWidget {
 }
 
 class _GroupMembersScreenState extends State<GroupMembersScreen> {
-  // Поиск кандидатов в участники (C11): только для админа чата
+  // Поиск кандидатов в участники (AGENTS.md, №19): только для админа чата
   final _search = TextEditingController();
   List<User> _results = [];
   String _query = '';
