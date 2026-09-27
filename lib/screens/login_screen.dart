@@ -24,6 +24,22 @@ class _LoginScreenState extends State<LoginScreen> {
     super.dispose();
   }
 
+  /// Переключение вход ↔ регистрация.
+  ///
+  /// Форма очищается целиком, вместе с текстом ошибки: пароль из регистрации,
+  /// оставшийся в поле входа, давал 401 при верной учётке, а refusal с
+  /// противоположного режима висел плашкой на чистой форме (эталон —
+  /// watch(isRegister) в LoginView.vue).
+  void _toggleMode(AuthState auth) {
+    auth.clearError();
+    for (final field in [
+      _phone, _password, _passwordConfirm, _email, _firstName, _lastName,
+    ]) {
+      field.clear();
+    }
+    setState(() => _isRegister = !_isRegister);
+  }
+
   Future<void> _submit() async {
     final auth = context.read<AuthState>();
     final phone = _phone.text.trim();
@@ -124,7 +140,7 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
             TextButton(
-              onPressed: () => setState(() => _isRegister = !_isRegister),
+              onPressed: () => _toggleMode(auth),
               child: Text(_isRegister ? 'У меня уже есть аккаунт' : 'Создать аккаунт'),
             ),
           ],

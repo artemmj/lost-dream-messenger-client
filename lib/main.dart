@@ -38,6 +38,14 @@ void main() {
     );
   };
 
+  // ChatState нужен мой id, чтобы отличать своё прочтение от чужого в кадре
+  // messages_read (дефект №10) и помечать прочитанными только свои сообщения.
+  // Профиль догружается асинхронно (bootstrap/login/register), поэтому следим
+  // за AuthState, а не снимаем значение один раз.
+  void syncMyId() => chat.myUserId = auth.me?.id;
+  auth.addListener(syncMyId);
+  syncMyId();
+
   runApp(
     MultiProvider(
       providers: [

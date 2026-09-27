@@ -67,12 +67,13 @@ class AuthState extends ChangeNotifier {
   }) async {
     _loading = true; _error = null; notifyListeners();
     try {
+      // Api.register уже сохранил пару JWT из ответа (201 {user, access,
+      // refresh}), поэтому отдельный login не нужен: он дублировал запрос
+      // и жёг лимит scope `auth` — 10/мин (дефект №14).
       await Api().register(
         phone: phone, password: password, passwordConfirm: passwordConfirm,
         email: email, firstName: firstName, lastName: lastName,
       );
-      // После регистрации сразу логинимся
-      await Api().login(phone, password);
       _me = await Api().me();
       return true;
     } catch (e) {
@@ -81,6 +82,13 @@ class AuthState extends ChangeNotifier {
     } finally {
       _loading = false; notifyListeners();
     }
+  }
+
+  /// Сбрасывает текст ошибки. Экрану нужна чистая форма при переключении
+  /// вход ↔ регистрация: в эталоне это `watch(isRegister) → clearError()`.
+  void clearError() {
+    _error = null;
+    notifyListeners();
   }
 
   Future<bool> updateProfile(Map<String, dynamic> payload) async {

@@ -31,20 +31,36 @@ class _ProfileScreenState extends State<ProfileScreen> {
     super.dispose();
   }
 
+  bool _saving = false;
+  String? _localError;
+
   Future<void> _save() async {
+    if (_saving) return;
+    final phone = _phone.text.trim();
+    // Телефон — логин входа: пустым он быть не может, и бэкенд вернул бы 400.
+    // Проверяем локально, чтобы текст появился сразу и поле не уехало в запрос
+    // (эталон: save в ProfileModal.vue)
+    if (phone.isEmpty) {
+      setState(() => _localError = 'Телефон не может быть пустым');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _localError = null;
+    });
     final auth = context.read<AuthState>();
     final ok = await auth.updateProfile({
-      'phone': _phone.text.trim(),
+      'phone': phone,
       'email': _email.text.trim(),
       'first_name': _firstName.text.trim(),
       'last_name': _lastName.text.trim(),
     });
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(ok ? 'Профиль обновлён' : (auth.error ?? 'Ошибка'))),
-      );
-      if (ok) Navigator.pop(context);
-    }
+    if (!mounted) return;
+    setState(() => _saving = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(ok ? 'Профиль обновлён' : (auth.error ?? 'Ошибка'))),
+    );
+    if (ok) Navigator.pop(context);
   }
 
   @override
@@ -69,10 +85,19 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   labelText: 'Телефон',
                   helperText: 'Телефон — логин, вход будет по новому номеру',
                 )),
+            if (_localError != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(_localError!,
+                    style: TextStyle(fontSize: 12, color: Colors.red.shade900)),
+              ),
             const SizedBox(height: 24),
             SizedBox(
               width: double.infinity,
-              child: FilledButton(onPressed: _save, child: const Text('Сохранить')),
+              child: FilledButton(
+                onPressed: _saving ? null : _save,
+                child: Text(_saving ? 'Сохранение...' : 'Сохранить'),
+              ),
             ),
           ],
         ),

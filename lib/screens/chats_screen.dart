@@ -13,13 +13,41 @@ class ChatsScreen extends StatefulWidget {
   State<ChatsScreen> createState() => _ChatsScreenState();
 }
 
-class _ChatsScreenState extends State<ChatsScreen> {
+class _ChatsScreenState extends State<ChatsScreen> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     final chat = context.read<ChatState>();
     chat.loadChats();
     chat.openNotificationsSocket();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// Мобильный аналог `visibilitychange` из эталона (ChatView.vue и
+  /// useNotificationsSocket.ts): возвращение в приложение — повод перечитать
+  /// открытый чат и оживить личный канал уведомлений.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!mounted) return;
+    final chat = context.read<ChatState>();
+    // `inactive` не считаем фоном: это, например, открытая шторка или системный
+    // диалог — приложение по-прежнему видно пользователю.
+    final foreground = state == AppLifecycleState.resumed;
+    chat.isForeground = foreground;
+    if (!foreground) return;
+    chat.ensureNotificationsSocket();
+    final chatId = chat.selectedChatId;
+    if (chatId != null) {
+      chat.ensureChatSocket();
+      // Всё, что пришло в отсутствие пользователя, считаем прочитанным
+      chat.markRead(chatId);
+    }
   }
 
   @override
@@ -38,13 +66,12 @@ class _ChatsScreenState extends State<ChatsScreen> {
           IconButton(
             icon: const Icon(Icons.logout),
             onPressed: () async {
-              // Полная очистка состояния перед выходом
+              // clearAll закрывает оба сокета и обнуляет состояние, поэтому
+              // отдельные closeNotificationsSocket/closeChat здесь не нужны:
+              // без очистки после выхода продолжали идти запросы с протухшим
+              // токеном (дефект №4).
+              // _Boot сам покажет LoginScreen через watch<AuthState>.
               chat.clearAll();
-              chat.closeNotificationsSocket();
-              chat.closeChat();
-              
-              // Очищаем токены и сбрасываем состояние авторизации.
-              // _Boot автоматически покажет LoginScreen благодаря watch<AuthState>.
               await auth.logout();
             },
           ),

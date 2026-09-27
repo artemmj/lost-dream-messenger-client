@@ -4,6 +4,8 @@ import '../models/message.dart';
 import '../services/api.dart';
 import '../services/ws.dart';
 
+/// PAGE_SIZE бэкенда: полная страница означает, что пропущенных сообщений
+/// могло накопиться больше одной страницы (см. reloadMessages).
 const int messagesPageSize = 50;
 
 /// Состояние WebSocket открытого чата (дефект №20): раньше статус хранился
@@ -21,7 +23,12 @@ class ChatState extends ChangeNotifier {
 
   final Set<String> onlineUsers = {};
   int messagesPage = 1;
-  bool hasMoreMessages = true;
+
+  /// Есть ли ещё более старые сообщения. До первого ответа сервера — false:
+  /// иначе лента успевала запросить страницу 2 до завершения загрузки страницы 1
+  /// (гонка при открытии чата). Значение берётся из `next` пагинатора, а не из
+  /// количества элементов (дефект №11).
+  bool hasMoreMessages = false;
   bool isLoadingHistory = false;
 
   /// Ошибка загрузки истории открытого чата. Раньше в _loadFirstPage был глухой
@@ -36,6 +43,28 @@ class ChatState extends ChangeNotifier {
   /// Ошибка загрузки списка чатов (loadChats / pull-to-refresh). Плашка над
   /// списком в ChatsScreen — раньше 429 и офлайн выглядели как «Чатов пока нет».
   String? listError;
+
+  /// Отказ при отправке: текст REST-ошибки или кадр `{error: ...}` от сервера
+  /// (пустое сообщение, текст длиннее 5000 символов, анти-флуд 10/10 с).
+  /// Раньше такие кадры проглатывались: у них нет ни `type`, ни `id`, поэтому
+  /// поле ввода просто очищалось и сообщение молча не уходило (дефект №9).
+  String? sendError;
+
+  /// Мой id. Нужен, чтобы не рисовать ✓✓ на своих сообщениях, когда событие
+  /// `messages_read` пришло на моё же прочтение (дефект №10). В payload JWT
+  /// только `user_id`, профиль догружается отдельным запросом, поэтому значение
+  /// проставляется из AuthState при wiring'е в main.dart.
+  String? myUserId;
+
+  /// Приложение на переднем плане. Мобильный аналог
+  /// `document.visibilityState === 'visible'` из эталона: значение выставляет
+  /// ChatsScreen в didChangeAppLifecycleState.
+  ///
+  /// Влияет на одно решение — считать ли пришедшее в открытый чат сообщение
+  /// прочитанным сразу (эталон: applyNewMessage в stores/chat.ts). Без проверки
+  /// фоновое приложение молча двигало курсор прочтения, и пользователь терял
+  /// бейджи непрочитанного, так и не увидев сообщения.
+  bool isForeground = true;
 
   /// Однократные ошибки без своего места в UI (например, markRead): подписчик
   /// в main.dart показывает их SnackBar'ом через navigatorKey. Плашка тут не
@@ -73,6 +102,54 @@ class ChatState extends ChangeNotifier {
     }
   }
 
+  /// Собеседник в сети (для личного чата). null — показывать нечего: чат не
+  /// личный, либо собеседник ещё не пришёл со списком чатов.
+  ///
+  /// Источник — снимок initial_presence и кадры user_status канала чата.
+  bool? get interlocutorOnline {
+    final chat = selectedChat;
+    if (chat == null || chat.type != ChatType.private) return null;
+    final other = chat.interlocutor;
+    if (other == null) return null;
+    return onlineUsers.contains(other.id);
+  }
+
+  /// Сколько участников группы в сети. null — детали группы ещё не загружены.
+  ///
+  /// Себя не считаем: «в сети» здесь про остальных (как в эталонном
+  /// onlineMembersCount).
+  int? get onlineMembersCount {
+    final detail = currentChatDetail;
+    if (detail == null || detail.type != ChatType.group) return null;
+    return detail.members
+        .where((m) => m.user.id != myUserId && onlineUsers.contains(m.user.id))
+        .length;
+  }
+
+  /// Участники группы без меня — знаменатель счётчика «N в сети из M».
+  List<ChatMember> get otherMembers {
+    final detail = currentChatDetail;
+    if (detail == null) return const [];
+    return detail.members.where((m) => m.user.id != myUserId).toList();
+  }
+
+  /// GROUP переименовывает только админ (сервер вернёт 403 остальным).
+  bool get canRenameChat {
+    final chat = selectedChat;
+    return chat != null &&
+        chat.type == ChatType.group &&
+        (currentChatDetail?.myIsAdmin ?? false);
+  }
+
+  /// GROUP удаляет только админ, PRIVATE — любой участник: в личном чате мы
+  /// состоим по определению, поэтому прав там проверять нечего.
+  bool get canDeleteChat {
+    final chat = selectedChat;
+    if (chat == null) return false;
+    if (chat.type == ChatType.private) return true;
+    return currentChatDetail?.myIsAdmin ?? false;
+  }
+
   /// Загружает список чатов с бэкенда и обновляет состояние.
   ///
   /// Сейчас всегда загружает первую страницу (50 чатов) — см. дефект №11 в AGENTS.md.
@@ -98,11 +175,12 @@ class ChatState extends ChangeNotifier {
     selectedChatId = chatId;
     messages = [];
     messagesPage = 1;
-    hasMoreMessages = true;
+    hasMoreMessages = false;
     onlineUsers.clear();
     currentChatDetail = null;
     loadError = null;
     detailsError = null;
+    sendError = null;
     wsCloseNotice = null;
     notifyListeners();
 
@@ -123,17 +201,15 @@ class ChatState extends ChangeNotifier {
   /// но затем сериализует её как page[::-1] — то есть уже по возрастанию времени.
   /// Поэтому .reversed здесь не нужен: messages добавляются в естественном порядке
   /// (старые сверху, новые снизу).
-  ///
-  /// hasMoreMessages определяется по количеству сообщений == 50, что неточно:
-  /// если сообщений ровно 50, мы не знаем, есть ли ещё страницы. См. дефект №11 в AGENTS.md.
   Future<void> _loadFirstPage(String chatId) async {
     try {
       final page = await _api.messages(chatId, page: 1);
       // Страница могла прийти после смены чата — не затираем данные нового
       if (selectedChatId != chatId) return;
       // Бэкенд уже отдал страницу по возрастанию времени (views.py: MessageSerializer(page[::-1]))
-      messages = page;
-      hasMoreMessages = page.length == messagesPageSize;
+      messages = page.items;
+      messagesPage = 1;
+      hasMoreMessages = page.hasNext;
       loadError = null;
       notifyListeners();
     } catch (e) {
@@ -165,31 +241,34 @@ class ChatState extends ChangeNotifier {
   /// Бэкенд отдаёт каждую страницу по возрастанию времени, поэтому при объединении
   /// старая страница вставляется в начало списка: [...older, ...messages].
   /// .reversed не нужен — см. комментарий к _loadFirstPage.
-  ///
-  /// hasMoreMessages опять определяется по длине == 50, что неточно (дефект №11).
   Future<void> loadOlderMessages() async {
-    if (!hasMoreMessages || isLoadingHistory || selectedChatId == null) return;
+    final chatId = selectedChatId;
+    if (chatId == null || !hasMoreMessages || isLoadingHistory) return;
     isLoadingHistory = true;
     notifyListeners();
     try {
       final next = messagesPage + 1;
-      final older = await _api.messages(selectedChatId!, page: next);
-      if (older.isEmpty) {
-        // Пустая страница — значит, дошли до самого старого сообщения
-        hasMoreMessages = false;
-      } else {
-        // Вставляем старую страницу в начало (сообщения идут от старых к новым)
-        messages = [...older, ...messages];
-        messagesPage = next;
-        hasMoreMessages = older.length == messagesPageSize;
-      }
+      final older = await _api.messages(chatId, page: next);
+      // Чат могли переключить, пока шёл запрос — не подмешиваем чужую историю
+      if (selectedChatId != chatId) return;
+      // Границы страниц разъезжаются, если во время запроса пришли новые
+      // сообщения, поэтому дубли отсекаем по id
+      final known = messages.map((m) => m.id).toSet();
+      messages = [
+        ...older.items.where((m) => !known.contains(m.id)),
+        ...messages,
+      ];
+      messagesPage = next;
+      hasMoreMessages = older.hasNext;
       loadError = null;
     } catch (e) {
+      if (selectedChatId != chatId) return;
       // Дозагрузка старых страниц тоже больше не молчит (дефект №15):
       // 429 по scope `user` или офлайн иначе выглядят как «список не листается»
       loadError = _describe('Не удалось загрузить более старые сообщения', e);
+    } finally {
+      isLoadingHistory = false;
     }
-    isLoadingHistory = false;
     notifyListeners();
   }
 
@@ -220,23 +299,33 @@ class ChatState extends ChangeNotifier {
   ///
   /// Экран проверяет возвращаемое значение: если не-null (REST), скроллит к сообщению.
   /// При WS-эхо (null) скролла нет — дефект №12 в AGENTS.md.
+  /// Ошибку не глотает: текст отказа ложится в sendError и пробрасывается дальше,
+  /// чтобы экран вернул несообщённый текст в поле ввода.
   Future<Message?> sendMessage(String text) async {
-    if (selectedChatId == null) return null;
+    final chatId = selectedChatId;
+    if (chatId == null) return null;
+    sendError = null;
 
-    // Пытаемся отправить через WebSocket
+    // Пытаемся отправить через WebSocket. «Жив» означает завершённый handshake
+    // (WsClient.isConnected): при неподтверждённом соединении send() бросает
+    // StateError, и отправка штатно уходит в REST, а не в мёртвый сокет (№28).
     if (_chatSocket != null && _chatSocket!.isConnected) {
       try {
         _chatSocket!.send({'text': text});
+        notifyListeners();
         return null; // своё сообщение придёт через WS-эхо из broadcast группы
       } catch (_) {}
     }
 
     // Fallback на REST, если сокет недоступен
     try {
-      final msg = await _api.sendMessage(selectedChatId!, text);
+      final msg = await _api.sendMessage(chatId, text);
       addMessage(msg);
       return msg;
-    } on ApiException {
+    } catch (e) {
+      // Сюда же прилетает 429 от REST-scope `send` (60/мин)
+      sendError = _describe('Сообщение не отправлено', e);
+      notifyListeners();
       rethrow;
     }
   }
@@ -265,6 +354,24 @@ class ChatState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Переименовывает GROUP-чат (только админ, иначе 403).
+  ///
+  /// Название применяем сразу по ответу PATCH, не дожидаясь `chat_renamed` из
+  /// личного канала. Ошибку не глотаем: текст detail нужен экрану.
+  Future<void> renameChat(String chatId, String name) async {
+    final detail = await _api.renameChat(chatId, name);
+    applyRename(chatId, detail.name ?? name);
+  }
+
+  /// Удаляет чат вместе с историей (PRIVATE — любой участник, GROUP — админ).
+  ///
+  /// Список обновляем сразу, не дожидаясь `chat_deleted`: сервер разнесёт его
+  /// остальным участникам секундой позже. closeChat вызывает removeChat.
+  Future<void> deleteChat(String chatId) async {
+    await _api.deleteChat(chatId);
+    removeChat(chatId);
+  }
+
   /// Добавляет новое сообщение в локальный список и обновляет превью в списке чатов.
   ///
   /// Если сообщение из другого чата (selectedChatId != msg.chat) — игнорируется.
@@ -291,6 +398,7 @@ class ChatState extends ChangeNotifier {
     onlineUsers.clear();
     loadError = null;
     detailsError = null;
+    sendError = null;
     wsCloseNotice = null;
     _closeChatSocket();
     notifyListeners();
@@ -328,27 +436,35 @@ class ChatState extends ChangeNotifier {
     _wsStatus = WsStatus.disconnected;
   }
 
+  /// Оживляет сокет открытого чата после возврата из фона.
+  ///
+  /// Мобильная специфика: ОС рвёт соединения спящего приложения, а отказ по
+  /// лимиту одновременных подключений (4009 — старые соединения сервер ещё
+  /// считает живыми) входит в noReconnectCodes, и сокет остаётся мёртвым, пока
+  /// чат не переоткрыть. Переподключение заодно добирает пропущенные сообщения
+  /// (onReconnect → reloadMessages).
+  void ensureChatSocket() {
+    final socket = _chatSocket;
+    if (socket == null || socket.isConnected) return;
+    _wsStatus = WsStatus.connecting;
+    notifyListeners();
+    socket.revive();
+  }
+
   /// Обрабатывает кадры WebSocket канала чата.
   ///
   /// Типы кадров от сервера:
-  /// - null/'' (нет type) — новое сообщение, приходит без поля type
-  /// - 'user_status' — пользователь онлайн/оффлайн (onlineUsers не отображается в UI)
+  /// - 'user_status' — пользователь онлайн/оффлайн
   /// - 'initial_presence' — снимок онлайн-пользователей при подключении
-  /// - 'messages_read' — кто-то прочитал сообщения (reader_id объявлен, но не используется — дефект №10)
-  /// - '{error: ...}' — ошибка от сервера (пустой текст, >5000 символов, анти-флуд) — НЕ обрабатывается, дефект №9
+  /// - 'messages_read' — кто-то прочитал сообщения (фильтруем своё прочтение, дефект №10)
+  /// - '{error: ...}' — отказ сервера (пустой текст, >5000 символов, анти-флуд),
+  ///   соединение при этом остаётся живым — дефект №9
+  /// - *(нет type)* — новое сообщение
   void _handleChatEvent(Map<String, dynamic> event) {
     final type = event['type'] as String?;
     switch (type) {
-      case null:
-      case '':
-        // Новое сообщение — бэкенд присылает его без поля type
-        if (event['id'] != null) {
-          final msg = Message.fromJson(event);
-          addMessage(msg);
-        }
-        break;
       case 'user_status':
-        // Обновляем набор онлайн-пользователей (пока не отображается в UI)
+        // Обновляем набор онлайн-пользователей
         final uid = event['user_id'] as String;
         if (event['status'] == 'online') {
           onlineUsers.add(uid);
@@ -358,19 +474,48 @@ class ChatState extends ChangeNotifier {
         notifyListeners();
         break;
       case 'initial_presence':
-        // При подключении получаем снимок всех онлайн-пользователей чата
+        // Снимок заменяет набор целиком: addAll накапливал бы статусы
+        // участников прошлого подключения после reconnect'а
         final ids = (event['user_ids'] as List).cast<String>();
-        onlineUsers.addAll(ids);
+        onlineUsers
+          ..clear()
+          ..addAll(ids);
         notifyListeners();
         break;
       case 'messages_read':
-        // Кто-то прочитал все сообщения в чате.
-        // reader_id есть в кадре, но игнорируется — помечаем ВСЕ сообщения прочитанными (дефект №10).
-        // Бэкенд рассылает событие и самому читателю, поэтому галочки обновляются у всех.
-        messages = messages.map((m) => m.copyWith(isRead: true)).toList();
-        notifyListeners();
+        // Бэкенд рассылает событие и самому читателю, поэтому своё прочтение
+        // отсекаем: иначе мои сообщения получали ✓✓ от того, что прочитал я сам
+        // (дефект №10).
+        final readerId = event['reader_id'] as String?;
+        if (readerId != null && readerId == myUserId) return;
+        markAllRead();
+        break;
+      case null:
+      case '':
+        // Кадр без type: либо отказ сервера ({error}), либо новое сообщение
+        final error = event['error'];
+        if (error != null) {
+          sendError = error.toString();
+          notifyListeners();
+          return;
+        }
+        if (event['id'] != null) {
+          addMessage(Message.fromJson(event));
+        }
         break;
     }
+  }
+
+  /// Помечает прочитанными только МОИ сообщения: ✓✓ означает «собеседник
+  /// прочитал», чужих сообщений этот флаг не касается (дефект №10).
+  void markAllRead() {
+    final me = myUserId;
+    if (me == null) return;
+    messages = [
+      for (final m in messages)
+        m.sender.id == me && !m.isRead ? m.copyWith(isRead: true) : m,
+    ];
+    notifyListeners();
   }
 
   /// Обрабатывает закрытие WebSocket чата.
@@ -408,16 +553,61 @@ class ChatState extends ChangeNotifier {
     _ => 'Соединение закрыто (код $code)',
   };
 
+  /// Перечитывание истории после WS-reconnect: добираем сообщения, пришедшие,
+  /// пока соединение было разорвано.
+  ///
+  /// Полная замена ленты (как делал `_loadFirstPage`) теряла уже догруженные
+  /// старшие страницы. Поэтому: вернулась полная страница — значит, пропущенных
+  /// сообщений может быть больше одной страницы и в истории возможна «дыра»,
+  /// перечитываем её с конца; иначе добираем только новые в хвост и обновляем
+  /// `is_read` у уже известных.
+  Future<void> reloadMessages() async {
+    final chatId = selectedChatId;
+    if (chatId == null) return;
+    try {
+      final page = await _api.messages(chatId, page: 1);
+      if (selectedChatId != chatId) return;
+      final latest = page.items;
+      if (latest.length >= messagesPageSize) {
+        messages = latest;
+        messagesPage = 1;
+        hasMoreMessages = page.hasNext;
+      } else {
+        final known = messages.map((m) => m.id).toSet();
+        final fresh = <Message>[];
+        final nowRead = <String>{};
+        for (final msg in latest) {
+          if (!known.contains(msg.id)) {
+            fresh.add(msg);
+          } else if (msg.isRead) {
+            // Статус прочтения мог измениться, пока сокет был закрыт
+            nowRead.add(msg.id);
+          }
+        }
+        if (nowRead.isNotEmpty) {
+          messages = [
+            for (final m in messages)
+              nowRead.contains(m.id) ? m.copyWith(isRead: true) : m,
+          ];
+        }
+        if (fresh.isNotEmpty) messages = [...messages, ...fresh];
+      }
+      loadError = null;
+    } catch (e) {
+      if (selectedChatId != chatId) return;
+      loadError = _describe('Не удалось обновить историю', e);
+    }
+    notifyListeners();
+  }
+
   /// Вызывается после успешного переподключения сокета (не первого подключения!).
   ///
-  /// Перезагружает первую страницу сообщений и список чатов, чтобы синхронизировать
-  /// состояние с сервером после разрыва связи. Статус уже 'connected' — он установлен
-  /// в onOpen, который срабатывает раньше onReconnect.
-  void _handleChatReconnect() async {
-    // Перечитываем историю и список чатов, как описано в AGENTS.md
-    if (selectedChatId != null) {
-      await _loadFirstPage(selectedChatId!);
-    }
+  /// Статус уже 'connected' — он установлен в onOpen, который срабатывает раньше
+  /// onReconnect. Прокрутку к новым сообщениям берёт на себя экран.
+  Future<void> _handleChatReconnect() async {
+    // Пока сокет был разорван, сообщения приходили мимо нас — добираем их через
+    // REST и перечитываем список чатов (бейджи и превью последнего сообщения)
+    await reloadMessages();
     await loadChats();
   }
 
@@ -456,27 +646,43 @@ class ChatState extends ChangeNotifier {
     _notificationsSocket = null;
   }
 
+  /// Поднимает личный канал, если он не жив.
+  ///
+  /// После отказа по лимиту (4009/4029) или невалидной сессии (4001) WsClient
+  /// сам больше не переподключается — эти коды в noReconnectCodes. Эталон
+  /// поднимает канал заново на visibilitychange (handleVisibility в
+  /// useNotificationsSocket.ts), мобильный аналог — AppLifecycleState.resumed:
+  /// без этого приложение, вернувшись из фона, навсегда оставалось без бейджей.
+  void ensureNotificationsSocket() => _notificationsSocket?.revive();
+
   void _handleNotification(Map<String, dynamic> event) {
     final type = event['type'];
     switch (type) {
       case 'new_message':
-        final chatId = event['chat'];
-        final unread = event['unread_count'] as int? ?? 0;
+        final chatId = event['chat'] as String?;
+        if (chatId == null) return;
         final idx = chats.indexWhere((c) => c.id == chatId);
         if (idx == -1) {
+          // Чата нет в списке — например, нас только что добавили в группу:
+          // перечитываем список, бейдж и превью придут вместе с ним
           loadChats();
-        } else {
-          final msg = event['message'] != null
-              ? Message.fromJson(event['message']) : null;
-          chats[idx] = chats[idx].copyWith(
-            unreadCount: unread, lastMessage: msg,
-          );
-          // если чат открыт и совпадает — сразу подтверждаем прочтение
-          if (chatId == selectedChatId && unread > 0) {
-            markRead(chatId);
-          }
-          notifyListeners();
+          return;
         }
+        final msg = event['message'] != null
+            ? Message.fromJson(event['message'] as Map<String, dynamic>)
+            : null;
+        // Открытый на переднем плане чат считаем прочитанным сразу, иначе
+        // наращиваем бейдж (эталон: applyNewMessage в stores/chat.ts). Раньше
+        // делались оба действия сразу — unread_count перезаписывался нулём
+        // из markRead, а в фоне курсор читался сам собой.
+        final opened = chatId == selectedChatId && isForeground;
+        chats[idx] = chats[idx].copyWith(
+          unreadCount: opened ? 0 : (event['unread_count'] as int? ?? 0),
+          lastMessage: msg,
+        );
+        notifyListeners();
+        // Курсор сдвигаем на сервере: он разнесёт chat_read остальным устройствам
+        if (opened) markRead(chatId);
         break;
       case 'chat_read':
         final chatId = event['chat'];
@@ -522,11 +728,12 @@ class ChatState extends ChangeNotifier {
     selectedChatId = null;
     onlineUsers.clear();
     messagesPage = 1;
-    hasMoreMessages = true;
+    hasMoreMessages = false;
     isLoadingHistory = false;
     loadError = null;
     detailsError = null;
     listError = null;
+    sendError = null;
     wsCloseNotice = null;
     
     notifyListeners();

@@ -54,6 +54,12 @@ class WsClient {
   int _handshakeFailures = 0;
   static const _probeAfter = 3;
 
+  // Идёт ли handshake прямо сейчас. connect() асинхронный (сначала refresh
+  // токена), поэтому без этого флага revive() в момент незавершённого
+  // подключения создал бы второй канал поверх первого — старый сокет остался
+  // бы жив и дублировал события.
+  bool _connecting = false;
+
   WsClient({
     required this.path,
     required this.onEvent,
@@ -64,6 +70,19 @@ class WsClient {
 
   /// Подключается к WebSocket-серверу.
   ///
+  /// Вызов во время незавершённого handshake игнорируется (см. _connecting).
+  Future<void> connect() async {
+    if (_connecting) return;
+    _connecting = true;
+    try {
+      await _handshake();
+    } finally {
+      _connecting = false;
+    }
+  }
+
+  /// Сам handshake: освежение токена, открытие канала и подписка на поток кадров.
+  ///
   /// Для нативных платформ (Android/iOS/macOS/Linux/Windows) используется IOWebSocketChannel
   /// с заголовком Origin, который требует бэкенд (AllowedHostsOriginValidator).
   /// Без этого заголовка Django отвечает 403 до accept(), и клиент уходит в бесконечный ретрай.
@@ -71,7 +90,7 @@ class WsClient {
   /// На web-платформе заголовки WebSocket-handshake недоступны браузером, поэтому
   /// используется обычный WebSocketChannel.connect. Для работы на web нужно настроить
   /// CORS_ALLOWED_ORIGINS и ALLOWED_HOSTS на бэкенде.
-  Future<void> connect() async {
+  Future<void> _handshake() async {
     _closedByUser = false;
     // Токен берём «освежённым»: просроченный JWT бэкенд отклоняет до accept,
     // клиент не видит кода закрытия и уходит в вечный backoff (дефект №16,
@@ -156,6 +175,25 @@ class WsClient {
       }
       _scheduleReconnect();
     }
+  }
+
+  /// Принудительно переподключиться, сбросив backoff.
+  ///
+  /// Нужен после возврата приложения в foreground: на кодах из noReconnectCodes
+  /// (4001 — сессия, 4009/4029 — лимиты подключений) клиент перестаёт
+  /// переподключаться навсегда, а эталон поднимает канал заново, как только
+  /// вкладка снова становится видимой (handleVisibility в useNotificationsSocket.ts).
+  /// Сокет, закрытый через close() (logout), не воскрешаем.
+  ///
+  /// Отменённый таймер намеренно не обнуляем: по `_retryTimer != null` в connect()
+  /// отличается первое подключение от повторного, и воскрешение — это повторное
+  /// (подписчик должен перечитать пропущенные события в onReconnect).
+  void revive() {
+    if (_isOpen || _closedByUser) return;
+    _retryCount = 0;
+    _handshakeFailures = 0;
+    _retryTimer?.cancel();
+    connect();
   }
 
   /// Пробный аутентифицированный REST-запрос после серии невидимых отказов

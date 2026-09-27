@@ -1,3 +1,9 @@
+/// Бэкенд отдаёт незаполненные поля пустыми строками, а модель хранит их как
+/// null — иначе `displayName` склеивал бы пустые сегменты. Запись через тернарный
+/// оператор с `?.isEmpty ?? true` читалась как ошибка приоритетов (дефект №27).
+String? _nullIfEmpty(String? value) =>
+    (value == null || value.isEmpty) ? null : value;
+
 class User {
   final String id;
   final String phone;
@@ -16,9 +22,9 @@ class User {
   factory User.fromJson(Map<String, dynamic> j) => User(
         id: j['id'] as String,
         phone: j['phone'] as String? ?? '',
-        email: (j['email'] as String?)?.isEmpty ?? true ? null : j['email'],
-        firstName: (j['first_name'] as String?)?.isEmpty ?? true ? null : j['first_name'],
-        lastName: (j['last_name'] as String?)?.isEmpty ?? true ? null : j['last_name'],
+        email: _nullIfEmpty(j['email'] as String?),
+        firstName: _nullIfEmpty(j['first_name'] as String?),
+        lastName: _nullIfEmpty(j['last_name'] as String?),
       );
 
   String get displayName {

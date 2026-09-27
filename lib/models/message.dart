@@ -27,3 +27,22 @@ class Message {
         createdAt: createdAt, isRead: isRead ?? this.isRead,
       );
 }
+
+/// Страница истории: сами сообщения и признак того, что есть более старые.
+///
+/// `hasNext` берётся из поля `next` пагинатора, а не из количества элементов:
+/// раньше «ещё страница есть» угадывалось по `length == 50` и врало, когда
+/// сообщений ровно 50 (дефект №11).
+class MessagePage {
+  final List<Message> items;
+  final bool hasNext;
+
+  MessagePage({required this.items, required this.hasNext});
+
+  factory MessagePage.fromJson(Map<String, dynamic> j) => MessagePage(
+        items: (j['results'] as List)
+            .map((e) => Message.fromJson(e as Map<String, dynamic>))
+            .toList(),
+        hasNext: j['next'] != null,
+      );
+}
