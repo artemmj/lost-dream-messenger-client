@@ -13,6 +13,17 @@ class AuthState extends ChangeNotifier {
   String? get error => _error;
   bool get isAuthenticated => _me != null;
 
+  /// Человекочитаемый текст ошибки: сообщение бэкенда из ApiException либо
+  /// «нет связи» для сетевых исключений (дефект №15).
+  static String _describe(Object e) => e is ApiException
+      ? e.message
+      : 'Нет связи с сервером';
+
+  /// Восстанавливает сессию из сохранённых токенов при старте.
+  ///
+  /// Причина отказа теперь видна на экране входа (LoginScreen показывает
+  /// `error` плашкой): «история не грузится, пустой экран» без текста нельзя
+  /// отличить от сорванной сети (дефект №15).
   Future<bool> bootstrap() async {
     final token = await TokenStore.access;
     if (token == null) return false;
@@ -20,8 +31,12 @@ class AuthState extends ChangeNotifier {
       _me = await Api().me();
       notifyListeners();
       return true;
-    } catch (_) {
+    } catch (e) {
+      // Токен не принят (или связи нет) — сбрасываем хранилище: повторный
+      // bootstrap с тем же мусором смысла не имеет
       await TokenStore.clear();
+      _error = 'Не удалось восстановить сессию: ${_describe(e)}';
+      notifyListeners();
       return false;
     }
   }
@@ -32,8 +47,10 @@ class AuthState extends ChangeNotifier {
       await Api().login(phone, password);
       _me = await Api().me();
       return true;
-    } on ApiException catch (e) {
-      _error = e.message;
+    } catch (e) {
+      // Не только ApiException: SocketException при офлайне раньше вылетал
+      // из future и ошибка до UI не доходила вообще (дефект №15)
+      _error = _describe(e);
       return false;
     } finally {
       _loading = false; notifyListeners();
@@ -58,8 +75,8 @@ class AuthState extends ChangeNotifier {
       await Api().login(phone, password);
       _me = await Api().me();
       return true;
-    } on ApiException catch (e) {
-      _error = e.message;
+    } catch (e) {
+      _error = _describe(e);
       return false;
     } finally {
       _loading = false; notifyListeners();
@@ -72,8 +89,8 @@ class AuthState extends ChangeNotifier {
       _error = null;
       notifyListeners();
       return true;
-    } on ApiException catch (e) {
-      _error = e.message;
+    } catch (e) {
+      _error = _describe(e);
       notifyListeners();
       return false;
     }
@@ -83,9 +100,13 @@ class AuthState extends ChangeNotifier {
   ///
   /// Очищает токены, сбрасывает состояние пользователя и очищает все данные чатов,
   /// чтобы предотвратить дальнейшие запросы к бэкенду с просроченными токенами.
-  Future<void> logout() async {
+  /// [reason] — если выход не по воле пользователя (4001 от бэкенда), причина
+  /// показывается плашкой на экране входа: без неё возврат к логину выглядит
+  /// как произвольный сброс (дефект №15).
+  Future<void> logout({String? reason}) async {
     await TokenStore.clear();
     _me = null;
+    _error = reason;
     notifyListeners();
   }
 }

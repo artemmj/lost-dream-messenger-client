@@ -73,7 +73,9 @@ class GroupMembersScreen extends StatelessWidget {
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.toString())),
+          SnackBar(content: Text(e is ApiException
+              ? 'Не удалось выйти из чата: ${e.message}'
+              : 'Не удалось выйти из чата: нет связи с сервером')),
         );
       }
     }
@@ -84,14 +86,19 @@ class GroupMembersScreen extends StatelessWidget {
   /// Бэкенд не позволяет удалить единственного админа — в этом случае вернётся ошибка 400.
   /// См. раздел 5 AGENTS.md «Контракт бэкенда».
   Future<void> _remove(BuildContext context, String userId) async {
+    // ChatState читаем до первого await: после async-паузы использование
+    // context без mounted-проверки — lint use_build_context_synchronously
+    final chatState = context.read<ChatState>();
     try {
       await Api().removeMember(chatId, userId);
-      await context.read<ChatState>().loadChatDetails(chatId);
+      await chatState.loadChatDetails(chatId);
     } catch (e) {
       if (context.mounted) {
         // Показываем сообщение об ошибке от бэкенда (например, «единственного админа удалить нельзя»)
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.toString())),
+          SnackBar(content: Text(e is ApiException
+              ? 'Не удалось удалить участника: ${e.message}'
+              : 'Не удалось удалить участника: нет связи с сервером')),
         );
       }
     }

@@ -24,9 +24,10 @@ Hilt, Retrofit + kotlinx.serialization, OkHttp WebSocket, DataStore). Оно у�
 поиска (№8) исправлены, блок «Гигиена» (№17–№20) закрыт, а также №25 (отображаемые имена),
 №28–№29 (стабильность WS: самоблокировка переподключений, теряющиеся отправки, незакрытый
 хвост №3) и №16 (оживление сессии: refresh токена перед WS-handshake, пробный REST-запрос после
-серии невидимых отказов, возврат к экрану входа по 4001); в №15 закрыта самая заметная часть
-(ошибка загрузки истории показывается в чате). Остаются открытые дефекты №9–№15, №21–№24
-и №26–№27 (см. раздел 7).
+серии невидимых отказов, возврат к экрану входа по 4001). Дефект №15 (глухие ошибки) закрыт
+почти полностью: все сетевые сбои теперь видны — плашки в чате и списке чатов, SnackBar для
+markRead, причина на экране входа. Остаются открытые дефекты №9–№14, №21–№24 и №26–№27
+(см. раздел 7).
 
 ## 2. Окружение и команды
 
@@ -43,7 +44,7 @@ flutter test             # смоук-тест: без сессии прилож
 flutter run -d <device>  # хост бэкенда правится в lib/config.dart
 ```
 
-Бэкенд поднимается отдельно: `cd ../lost-dream-messenger && docker compose up`
+Бэкенд поднимается отдельно: `cd ../lost-dream-messenger-server && docker compose up`
 (Postgres 18, Redis 7, Daphne на `:8000`, Vite-фронтенд на `:5173`).
 
 `lib/config.dart:5` — `AppConfig.host` как compile-time константа: эмулятор Android `10.0.2.2:8000`,
@@ -56,7 +57,8 @@ flutter run -d <device>  # хост бэкенда правится в lib/confi
 lib/
 ├── config.dart                  # AppConfig: host, apiBase (http://host/api/v1), wsBase (ws://host/ws)
 ├── main.dart                    # AuthState+ChatState создаются в main(), там же wiring
-│                                # chat.onSessionExpired (4001 → popUntil + logout через navigatorKey)
+│                                # chat.onSessionExpired (4001 → popUntil + logout(reason) через
+│                                # navigatorKey) и chat.onNotice (однократные ошибки → SnackBar)
 │                                # → MultiProvider(.value) → MaterialApp → _Boot
 │                                # _Boot: bootstrap(), далее выбор экрана через watch<AuthState>
 │                                # (isAuthenticated ? ChatsScreen : LoginScreen) — без ручной навигации
@@ -79,18 +81,24 @@ lib/
 │                                # (_probeAuth → 4001 при мёртвой сессии),
 │                                # noReconnectCodes = {4001,4003,4004,4009,4029}
 ├── state/
-│   ├── auth_state.dart          # me, loading, error; bootstrap/login/register/updateProfile/logout
+│   ├── auth_state.dart          # me, loading, error; bootstrap/login/register/updateProfile/logout;
+│   │                            # ошибки не глушатся: bootstrap пишет причину в error, logout(reason)
+│   │                            # — текст для экрана входа после 4001 (дефект №15)
 │   └── chat_state.dart          # chats, currentChatDetail, messages, selectedChatId, onlineUsers,
-│                                # wsStatus (enum WsStatus), loadError, wsCloseNotice, onSessionExpired,
+│                                # wsStatus (enum WsStatus), loadError/detailsError/listError (плашки),
+│                                # onNotice (SnackBar из main), wsCloseNotice, onSessionExpired,
 │                                # пагинация истории; сокет чата + сокет уведомлений;
 │                                # clearAll() — полная очистка при logout
 └── screens/
     ├── login_screen.dart        # Вход/регистрация в одном экране, переключение _isRegister;
+    │                            # плашка auth.error (bootstrap-отказ / 4001 / ошибка сабмита);
     │                            # после входа НИКАКОЙ ручной навигации — экран решает _Boot
-    ├── chats_screen.dart        # Список чатов, FAB «новый чат», иконки профиля и выхода
+    ├── chats_screen.dart        # Список чатов + плашка listError, FAB «новый чат»,
+    │                            # иконки профиля и выхода
     ├── chat_screen.dart         # Лента, поле ввода, шапка со статусом WS / причиной закрытия сокета
-    │                            # (wsCloseNotice), плашка ошибок отправки и загрузки истории
-    ├── new_chat_screen.dart     # Поиск с дебаунсом на Timer, режим «личный / групповой», чипы;
+    │                            # (wsCloseNotice), плашка ошибок: отправка / история / детали чата
+    ├── new_chat_screen.dart     # Поиск с дебаунсом на Timer (+плашка ошибки поиска, №15),
+    │                            # режим «личный / групповой», чипы;
     │                            # после создания — pushReplacement на ChatScreen
     ├── group_members_screen.dart# Участники: чип «админ», удаление других (админу), выход из чата (себе)
     └── profile_screen.dart      # PATCH своих полей (имя, фамилия, email, телефон)
@@ -110,7 +118,11 @@ android/ ios/ macos/ windows/ linux/ web/   # Сгенерированные `fl
 **Состояние.** Два `ChangeNotifier` в `MultiProvider` (`lib/main.dart`), оба создаются
 в `main()` до авторизации и передаются через `ChangeNotifierProvider.value`; там же навешен
 `chat.onSessionExpired` (4001 от бэкенда → `popUntil(isFirst)` по `navigatorKey`, `clearAll()`,
-`logout()`) — иначе толкнутый ChatScreen оставался бы поверх формы входа (см. дефект №4).
+`logout(reason)`) — иначе толкнутый ChatScreen оставался бы поверх формы входа (см. дефект №4).
+Рядом — `chat.onNotice`: одноразные ошибки без своего места в UI (`markRead`) показываются
+SnackBar'ом через `ScaffoldMessenger.of(navigatorKey.currentContext)` (дефект №15).
+Ошибки сетевых операций `ChatState` живут в полях `loadError` / `detailsError` / `listError`,
+`AuthState` — в `error`; экраны рисуют их плашками (см. №15).
 Экраны читают через `context.watch<T>()` (пересборка) и
 `context.read<T>()` (вызов методов). Отдельных ViewModel на экран нет, DI нет: `Api` — синглтон
 (`lib/services/api.dart:19-21`), `TokenStore` — статические методы.
@@ -351,13 +363,21 @@ WS-лимиты (`messenger/ratelimit.py`): сообщения 10/10 с (ина�
     но `AuthState.register` (`lib/state/auth_state.dart:53-59`) затем всё равно вызывает `login()`
     — лишний запрос в scope `auth` (10/мин). Комментарий `lib/services/api.dart:136-137`
     («Register возвращает токены?») устарел и вводит в заблуждение.
-15. **Ошибки глушатся.** ⚠️ **ИСПРАВЛЕНО ЧАСТИЧНО**. Самое заметное заделано: ошибка
-    загрузки истории (`ChatState._loadFirstPage`) больше не прячется в `catch (_) {}` —
-    ложится в `loadError` и показывается плашкой в `ChatScreen` (раньше сбой сети/401
-    выглядел как «пустой экран и ничего не происходит», симптом двух эмуляторов).
-    Остальные тихие catch остались: `ChatState.loadChats` / `loadChatDetails` /
-    `loadOlderMessages` / `markRead`, `AuthState.bootstrap`, поиск в `new_chat_screen` —
-    ни офлайн, ни 429, ни 403 там до UI не доходят.
+15. **Ошибки глушатся.** ✅ **ИСПРАВЛЕНО (почти полностью)**. Раньше сбой сети, 429 и 403
+    превращались в «пустой экран и ничего не происходит» (симптом двух эмуляторов). Теперь
+    каждая сетевая операция либо ложит ошибку в поле состояния, либо стреляет `onNotice`:
+    `loadChats` → `listError` (плашка над списком в `ChatsScreen`); `_loadFirstPage` и
+    `loadOlderMessages` → `loadError`; `loadChatDetails` → `detailsError` (обе — плашкой в
+    `ChatScreen`); `markRead` → `onNotice` (SnackBar через wiring в `main.dart`);
+    `AuthState.bootstrap` → `error` (плашка под шапкой `LoginScreen`, она же показывает
+    причину возврата к входу после 4001 — `logout(reason: ...)`); поиск в `new_chat_screen` →
+    `_searchError` (плашка); `login`/`register`/`updateProfile` ловят теперь не только
+    `ApiException`, но и сетевые исключения (`_describe` → «Нет связи с сервером»);
+    SnackBar'ы создания чата/группы и удаления/выхода из группы вместо сырого `e.toString()`;
+    текст `e.toString()` в `_send` заменён на сообщение `ApiException`; неизвестный код
+    закрытия WS больше не пустота — «Соединение закрыто (код N)».
+    Осознанно молчат два catch: разбор кривого JSON в `ws.dart` (кадр игнорируется — дефект
+    был описан и раньше) и `sendMessage` при мёртвом сокете (StateError → штатный REST-фолбэк).
 16. **Нет обработки смены токена и сессии в живых сокетах.** ✅ **ИСПРАВЛЕНО**.
     Симптом на двух эмуляторах («история грузится только на одном клиенте, после закрытия
     чата блокировка переходит другому») — это невидимый отказ WS-handshake: отказ до
@@ -366,9 +386,10 @@ WS-лимиты (`messenger/ratelimit.py`): сообщения 10/10 с (ина�
     парсит `exp` из JWT и делает refresh до подключения; (2) после 3 сорванных handshake
     без кода `WsClient._probeAuth()` дёргает `GET /users/me/` — если сессия мертва,
     сигналим `onClose(4001)`; (3) `ChatState.onSessionExpired` (wiring в `main.dart`)
-    снимает маршруты через `navigatorKey.popUntil`, делает `clearAll()` и `logout()` —
-    экран входа вместо вечного «подключение...». Если симптом вернётся — проверить
-    фантомные счётчики в Redis `messenger:presence` (см. раздел 4).
+    снимает маршруты через `navigatorKey.popUntil`, делает `clearAll()` и
+    `logout(reason: 'Сессия истекла — войдите заново')` — экран входа вместо вечного
+    «подключение...», плашка с `AuthState.error` объясняет причину. Если симптом вернётся —
+    проверить фантомные счётчики в Redis `messenger:presence` (см. раздел 4).
 28. **Исчезающие отправки при переподключении сокета.** ✅ **ИСПРАВЛЕНО**. `WsClient.isConnected`
    возвращал `_channel != null`, но канал присваивается **до** `await ready` — в фазе подключения
    и ретраев `ChatState.sendMessage` (`lib/state/chat_state.dart:160`) считал сокет живым, писал
@@ -484,10 +505,10 @@ WS-лимиты (`messenger/ratelimit.py`): сообщения 10/10 с (ина�
 ## 10. Порядок работ, если доводить до рабочего состояния
 
 1. ~~Дефекты №1–№3~~ ✅; ~~№4–№7~~ ✅; ~~№8 (дебаунс)~~ ✅ — критичный блок закрыт полностью.
-2. №9–№14 и остаток №15 (тихие catch вне загрузки истории) — поведение под нагрузкой и
+2. №9–№14 — поведение под нагрузкой и
    обратная связь: error-кадры, пагинация, скролл, системный «назад» (`PopScope`), лишний
    login при регистрации; ~~reconnect-шторм и теряющиеся отправки~~ ✅ (№28–№29);
-   ~~№16 (оживление сессии при 4001)~~ ✅.
+   ~~№16 (оживление сессии при 4001)~~ ✅; ~~№15 (глухие ошибки)~~ ✅ почти полностью.
 3. ~~№17–№20 (гигиена)~~ ✅ — анализатор, тест, мёртвый код, enum'ы.
 4. №21–№24 — платформенные конфиги, если нужны не-Android цели; ~~№25 (имена)~~ ✅, кроме
    идентификаторов сборки (осознанно отложены — см. текст дефекта).

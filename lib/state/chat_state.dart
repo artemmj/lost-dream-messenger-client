@@ -29,6 +29,19 @@ class ChatState extends ChangeNotifier {
   /// (дефект №15). Теперь текст виден плашкой в ChatScreen.
   String? loadError;
 
+  /// Ошибка загрузки деталей чата (участники, роль). Показывается в ChatScreen
+  /// там же, где loadError: при сбое список участников просто не отрисуется.
+  String? detailsError;
+
+  /// Ошибка загрузки списка чатов (loadChats / pull-to-refresh). Плашка над
+  /// списком в ChatsScreen — раньше 429 и офлайн выглядели как «Чатов пока нет».
+  String? listError;
+
+  /// Однократные ошибки без своего места в UI (например, markRead): подписчик
+  /// в main.dart показывает их SnackBar'ом через navigatorKey. Плашка тут не
+  /// подходит — ошибка может прийти, когда соответствующий экран не открыт.
+  void Function(String message)? onNotice;
+
   /// Человекочитаемая причина закрытия WS-сокета чата (плашка состояния из
   /// раздела 8). Код виден только для закрытий ПОСЛЕ accept; отказы до accept
   /// клиент различает пробным REST-запросом в WsClient (_probeAuth).
@@ -44,6 +57,13 @@ class ChatState extends ChangeNotifier {
 
   WsStatus? get wsStatus => _wsStatus;
 
+  /// Превращает исключение сетевого слоя в человекочитаемый текст (дефект №15):
+  /// ApiException уже несёт сообщение бэкенда на нужном языке, всё остальное
+  /// (SocketException, таймаут) — «нет связи с сервером».
+  static String _describe(String what, Object e) => e is ApiException
+      ? '$what: ${e.message}'
+      : '$what: нет связи с сервером';
+
   ChatListItem? get selectedChat {
     if (selectedChatId == null) return null;
     try {
@@ -56,12 +76,17 @@ class ChatState extends ChangeNotifier {
   /// Загружает список чатов с бэкенда и обновляет состояние.
   ///
   /// Сейчас всегда загружает первую страницу (50 чатов) — см. дефект №11 в AGENTS.md.
-  /// Ошибки сети и 429 silently игнорируются — дефект №15.
+  /// Ошибка больше не глушится: текст ложится в listError и виден плашкой над
+  /// списком (дефект №15).
   Future<void> loadChats() async {
     try {
       chats = await _api.listChats();
+      listError = null;
       notifyListeners();
-    } catch (_) {}
+    } catch (e) {
+      listError = _describe('Не удалось загрузить список чатов', e);
+      notifyListeners();
+    }
   }
 
   /// Выбирает чат для отображения: сбрасывает сообщения, загружает первую страницу,
@@ -77,6 +102,7 @@ class ChatState extends ChangeNotifier {
     onlineUsers.clear();
     currentChatDetail = null;
     loadError = null;
+    detailsError = null;
     wsCloseNotice = null;
     notifyListeners();
 
@@ -114,21 +140,24 @@ class ChatState extends ChangeNotifier {
       if (selectedChatId != chatId) return;
       // Больше не глушим: без этого сбоя пользователь видел пустую ленту
       // и «ничего не происходит» (дефект №15)
-      loadError = e is ApiException
-          ? 'Не удалось загрузить историю: ${e.message}'
-          : 'Не удалось загрузить историю: нет связи с сервером';
+      loadError = _describe('Не удалось загрузить историю', e);
       notifyListeners();
     }
   }
 
   /// Загружает детали чата (список участников, моя роль админа).
   ///
-  /// Ошибки silently игнорируются — дефект №15.
+  /// Ошибка больше не глушится: текст ложится в detailsError и показывается
+  /// той же плашкой, что и ошибка истории (дефект №15).
   Future<void> loadChatDetails(String chatId) async {
     try {
       currentChatDetail = await _api.chatDetail(chatId);
+      detailsError = null;
       notifyListeners();
-    } catch (_) {}
+    } catch (e) {
+      detailsError = _describe('Не удалось загрузить детали чата', e);
+      notifyListeners();
+    }
   }
 
   /// Подгружает более старые сообщения (пагинация назад во времени).
@@ -154,7 +183,12 @@ class ChatState extends ChangeNotifier {
         messagesPage = next;
         hasMoreMessages = older.length == messagesPageSize;
       }
-    } catch (_) {}
+      loadError = null;
+    } catch (e) {
+      // Дозагрузка старых страниц тоже больше не молчит (дефект №15):
+      // 429 по scope `user` или офлайн иначе выглядят как «список не листается»
+      loadError = _describe('Не удалось загрузить более старые сообщения', e);
+    }
     isLoadingHistory = false;
     notifyListeners();
   }
@@ -171,7 +205,12 @@ class ChatState extends ChangeNotifier {
         chats[idx] = chats[idx].copyWith(unreadCount: 0);
         notifyListeners();
       }
-    } catch (_) {}
+    } catch (e) {
+      // Ошибка курсора прочтения не должна выглядеть как «бейдж не сбросился»:
+      // одноразовое сообщение через onNotice (плашка чата для этого не место —
+      // markRead приходит и из WS-уведомлений, когда экран чата может быть закрыт)
+      onNotice?.call(_describe('Не удалось отметить чат прочитанным', e));
+    }
   }
 
   /// Отправляет сообщение в выбранный чат.
@@ -251,6 +290,7 @@ class ChatState extends ChangeNotifier {
     currentChatDetail = null;
     onlineUsers.clear();
     loadError = null;
+    detailsError = null;
     wsCloseNotice = null;
     _closeChatSocket();
     notifyListeners();
@@ -363,7 +403,9 @@ class ChatState extends ChangeNotifier {
     4004 => 'Чат удалён',
     4009 => 'Слишком много открытых соединений',
     4029 => 'Слишком частые переподключения',
-    _ => null,
+    // Неизвестный код тоже показываем: пустая плашка = молчаливая потеря
+    // информации (дефект №15)
+    _ => 'Соединение закрыто (код $code)',
   };
 
   /// Вызывается после успешного переподключения сокета (не первого подключения!).
@@ -483,6 +525,8 @@ class ChatState extends ChangeNotifier {
     hasMoreMessages = true;
     isLoadingHistory = false;
     loadError = null;
+    detailsError = null;
+    listError = null;
     wsCloseNotice = null;
     
     notifyListeners();

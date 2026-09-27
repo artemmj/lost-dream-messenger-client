@@ -28,6 +28,10 @@ class _NewChatScreenState extends State<NewChatScreen> {
   // Timer для дебаунса поиска — отменяет предыдущие запросы (дефект №8)
   Timer? _searchTimer;
 
+  // Ошибка последнего запроса поиска: раньше catch (_) {} молчал, и 429 по
+  // scope `search` выглядел как «ничего не найдено» (дефект №15)
+  String? _searchError;
+
   @override
   void dispose() {
     // Отменяем все отложенные запросы поиска при закрытии экрана
@@ -46,7 +50,10 @@ class _NewChatScreenState extends State<NewChatScreen> {
     _searchTimer?.cancel();
     
     if (q.trim().isEmpty) {
-      setState(() => _results = []);
+      setState(() {
+        _results = [];
+        _searchError = null;
+      });
       return;
     }
     
@@ -55,10 +62,18 @@ class _NewChatScreenState extends State<NewChatScreen> {
       try {
         final r = await Api().searchUsers(q.trim());
         if (mounted) {
-          setState(() => _results = r);
+          setState(() {
+            _results = r;
+            _searchError = null;
+          });
         }
-      } catch (_) {
-        // Ошибки поиска silently игнорируются
+      } catch (e) {
+        // Показываем причину пустой выдачи: текст бэкенда или «нет связи»
+        if (mounted) {
+          setState(() => _searchError = e is ApiException
+              ? 'Поиск не удался: ${e.message}'
+              : 'Поиск не удался: нет связи с сервером');
+        }
       }
     });
   }
@@ -79,9 +94,11 @@ class _NewChatScreenState extends State<NewChatScreen> {
   /// После создания загружаем список чатов, выбираем новый чат (открывает сокет),
   /// затем заменяем текущий экран на ChatScreen вместо возврата в список (дефект №5).
   Future<void> _createPrivate(User u) async {
+    // ChatState читаем до первого await: после async-паузы context использовать
+    // нельзя (use_build_context_synchronously)
+    final chat = context.read<ChatState>();
     try {
       final detail = await Api().createPrivateChat(u.id);
-      final chat = context.read<ChatState>();
       await chat.loadChats();
       await chat.selectChat(detail.id);
       
@@ -94,7 +111,9 @@ class _NewChatScreenState extends State<NewChatScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.toString())),
+          SnackBar(content: Text(e is ApiException
+              ? 'Не удалось создать чат: ${e.message}'
+              : 'Не удалось создать чат: нет связи с сервером')),
         );
       }
     }
@@ -106,13 +125,14 @@ class _NewChatScreenState extends State<NewChatScreen> {
   /// затем заменяем текущий экран на ChatScreen вместо возврата в список (дефект №5).
   Future<void> _createGroup() async {
     if (_groupName.text.trim().isEmpty || _selected.isEmpty) return;
+    // ChatState читаем до первого await (см. комментарий в _createPrivate)
+    final chat = context.read<ChatState>();
     try {
       final detail = await Api().createGroupChat(
         name: _groupName.text.trim(),
         // Ключи Map — id пользователей; дубликаты исключены самой структурой
         memberIds: _selected.keys.toList(),
       );
-      final chat = context.read<ChatState>();
       await chat.loadChats();
       await chat.selectChat(detail.id);
       
@@ -125,7 +145,9 @@ class _NewChatScreenState extends State<NewChatScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.toString())),
+          SnackBar(content: Text(e is ApiException
+              ? 'Не удалось создать группу: ${e.message}'
+              : 'Не удалось создать группу: нет связи с сервером')),
         );
       }
     }
@@ -174,6 +196,15 @@ class _NewChatScreenState extends State<NewChatScreen> {
                   onDeleted: () => setState(() => _selected.remove(u.id)),
                 )).toList(),
               ),
+            ),
+          // Заметная причина пустой выдачи поиска (дефект №15)
+          if (_searchError != null)
+            Container(
+              width: double.infinity,
+              color: Colors.red.shade100,
+              padding: const EdgeInsets.all(8),
+              child: Text(_searchError!,
+                  style: TextStyle(color: Colors.red.shade900)),
             ),
           Expanded(
             child: ListView.builder(

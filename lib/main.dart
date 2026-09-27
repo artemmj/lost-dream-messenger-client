@@ -18,10 +18,24 @@ void main() {
   // снимаем все маршруты поверх home и разлогиниваем — _Boot через
   // watch<AuthState> сам покажет LoginScreen. ChatState.clearAll закрывает
   // оба сокета, чтобы мёртвая сессия не порождала новые ретраи.
+  // reason попадёт в AuthState.error, и экран входа объяснит, почему сброс
+  // произошёл сам (дефект №15).
   chat.onSessionExpired = () {
     _navigatorKey.currentState?.popUntil((route) => route.isFirst);
     chat.clearAll();
-    auth.logout();
+    auth.logout(reason: 'Сессия истекла — войдите заново');
+  };
+
+  // Однократные ошибки ChatState (markRead и т.п.): показываем SnackBar'ом над
+  // текущим экраном — у них нет своей плашки, а молчать они не должны.
+  // Контекст из navigatorKey указывает ниже MaterialApp, поэтому ScaffoldMessenger
+  // его находит.
+  chat.onNotice = (message) {
+    final context = _navigatorKey.currentContext;
+    if (context == null) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   };
 
   runApp(

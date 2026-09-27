@@ -17,7 +17,7 @@ import 'token_store.dart';
 const noReconnectCodes = {4001, 4003, 4004, 4009, 4029};
 
 class WsClient {
-  /// Путь к endpoint без схемы и хоста, например 'chat/<uuid>/' или 'notifications/'
+  /// Путь к endpoint без схемы и хоста, например `chat/<uuid>/` или `notifications/`
   final String path;
 
   /// Колбэк для каждого полученного кадра от сервера

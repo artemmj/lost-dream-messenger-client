@@ -50,20 +50,38 @@ class _ChatsScreenState extends State<ChatsScreen> {
           ),
         ],
       ),
-      body: RefreshIndicator(
-        onRefresh: chat.loadChats,
-        child: chat.chats.isEmpty
-            ? ListView(children: const [
-                SizedBox(height: 200),
-                Center(child: Text('Чатов пока нет')),
-              ])
-            : ListView.builder(
-                itemCount: chat.chats.length,
-                itemBuilder: (_, i) {
-                  final c = chat.chats[i];
-                  return _ChatTile(chat: c);
-                },
+      body: Column(
+        children: [
+          // Ошибка загрузки списка: без неё 429 и офлайн выглядели как
+          // «Чатов пока нет» (дефект №15)
+          if (chat.listError != null)
+            Container(
+              width: double.infinity,
+              color: Colors.red.shade100,
+              padding: const EdgeInsets.all(8),
+              child: Text(
+                chat.listError!,
+                style: TextStyle(color: Colors.red.shade900),
               ),
+            ),
+          Expanded(
+            child: RefreshIndicator(
+              onRefresh: chat.loadChats,
+              child: chat.chats.isEmpty
+                  ? ListView(children: const [
+                      SizedBox(height: 200),
+                      Center(child: Text('Чатов пока нет')),
+                    ])
+                  : ListView.builder(
+                      itemCount: chat.chats.length,
+                      itemBuilder: (_, i) {
+                        final c = chat.chats[i];
+                        return _ChatTile(chat: c);
+                      },
+                    ),
+            ),
+          ),
+        ],
       ),
       floatingActionButton: FloatingActionButton(
         onPressed: () => Navigator.push(context,

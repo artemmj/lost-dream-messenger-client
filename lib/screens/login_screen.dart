@@ -30,7 +30,6 @@ class _LoginScreenState extends State<LoginScreen> {
     final password = _password.text;
     if (phone.isEmpty || password.isEmpty) return;
 
-    bool ok;
     if (_isRegister) {
       if (password != _passwordConfirm.text) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -38,25 +37,23 @@ class _LoginScreenState extends State<LoginScreen> {
         );
         return;
       }
-      ok = await auth.register(
+      await auth.register(
         phone: phone, password: password, passwordConfirm: _passwordConfirm.text,
         email: _email.text.trim().isEmpty ? null : _email.text.trim(),
         firstName: _firstName.text.trim().isEmpty ? null : _firstName.text.trim(),
         lastName: _lastName.text.trim().isEmpty ? null : _lastName.text.trim(),
       );
     } else {
-      ok = await auth.login(phone, password);
+      await auth.login(phone, password);
     }
 
     // После успешного входа навигация НЕ нужна: _Boot слушает AuthState через
     // context.watch и сам перестроится на ChatsScreen. Если бы мы толкали маршрут
     // поверх _Boot (как делалось раньше), logout не возвращал бы к форме входа —
     // толкнутый ChatsScreen оставался бы поверх невидимого _Boot в стеке навигатора.
-    if (!ok && auth.error != null && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(auth.error!)),
-      );
-    }
+    // При отказе ничего отдельно показывать не нужно: auth.error выводится
+    // плашкой под шапкой (см. build) — она же объясняет возврат к экрану входа
+    // после 4001 и причину неудачного bootstrap.
   }
 
   @override
@@ -68,6 +65,19 @@ class _LoginScreenState extends State<LoginScreen> {
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
+            // Причина, почему мы снова на экране входа: неудачный bootstrap,
+            // отказ логина/регистрации или сброс сессии по 4001 (дефект №15)
+            if (auth.error != null)
+              Container(
+                width: double.infinity,
+                margin: const EdgeInsets.only(bottom: 12),
+                color: Colors.red.shade100,
+                padding: const EdgeInsets.all(8),
+                child: Text(
+                  auth.error!,
+                  style: TextStyle(color: Colors.red.shade900),
+                ),
+              ),
             TextField(
               controller: _phone,
               decoration: const InputDecoration(labelText: 'Телефон'),

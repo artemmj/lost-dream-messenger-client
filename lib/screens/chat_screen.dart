@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/chat.dart';
 import '../models/message.dart';
+import '../services/api.dart';
 import '../state/chat_state.dart';
 import '../state/auth_state.dart';
 import 'group_members_screen.dart';
@@ -55,7 +56,11 @@ class _ChatScreenState extends State<ChatScreen> {
         });
       }
     } catch (e) {
-      setState(() => _sendError = e.toString());
+      // Сырое e.toString() показывало Dart-экспэшн целиком; берём текст
+      // бэкенда из ApiException, остальное сводим к «нет связи» (дефект №15)
+      setState(() => _sendError = e is ApiException
+          ? 'Сообщение не отправлено: ${e.message}'
+          : 'Сообщение не отправлено: нет связи с сервером');
     }
   }
 
@@ -64,9 +69,10 @@ class _ChatScreenState extends State<ChatScreen> {
     final chat = context.watch<ChatState>();
     final auth = context.watch<AuthState>();
     final detail = chat.currentChatDetail;
-    // Общая плашка ошибок экрана: отправка (осталась локальной) и загрузка
-    // истории (раньше проглатывалась молча — дефект №15)
-    final errorText = _sendError ?? chat.loadError;
+    // Общая плашка ошибок экрана: отправка, загрузка истории и деталей чата
+    // (раньше все три проглатывались молча — дефект №15). Показываем первую
+    // актуальную: при севшей сети они все появляются одновременно.
+    final errorText = _sendError ?? chat.loadError ?? chat.detailsError;
 
     return Scaffold(
       appBar: AppBar(
