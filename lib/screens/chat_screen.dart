@@ -64,6 +64,9 @@ class _ChatScreenState extends State<ChatScreen> {
     final chat = context.watch<ChatState>();
     final auth = context.watch<AuthState>();
     final detail = chat.currentChatDetail;
+    // Общая плашка ошибок экрана: отправка (осталась локальной) и загрузка
+    // истории (раньше проглатывалась молча — дефект №15)
+    final errorText = _sendError ?? chat.loadError;
 
     return Scaffold(
       appBar: AppBar(
@@ -71,8 +74,15 @@ class _ChatScreenState extends State<ChatScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(chat.selectedChat?.displayName ?? ''),
-            // Статус WebSocket — enum WsStatus (дефект №20), сравнение строк больше не нужно
-            if (chat.wsStatus != null)
+            // Плашка причины закрытия информативнее статуса (см. wsCloseNotice
+            // в ChatState); статус — enum WsStatus (дефект №20), сравнение
+            // строк больше не нужно
+            if (chat.wsCloseNotice != null)
+              Text(
+                chat.wsCloseNotice!,
+                style: TextStyle(fontSize: 11, color: Colors.red.shade700),
+              )
+            else if (chat.wsStatus != null)
               Text(
                 switch (chat.wsStatus!) {
                   WsStatus.connected => 'на связи',
@@ -103,11 +113,11 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       body: Column(
         children: [
-          if (_sendError != null)
+          if (errorText != null)
             Container(
               color: Colors.red.shade100,
               padding: const EdgeInsets.all(8),
-              child: Text(_sendError!, style: TextStyle(color: Colors.red.shade900)),
+              child: Text(errorText, style: TextStyle(color: Colors.red.shade900)),
             ),
           Expanded(
             child: ListView.builder(

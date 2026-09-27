@@ -24,6 +24,21 @@ class ChatState extends ChangeNotifier {
   bool hasMoreMessages = true;
   bool isLoadingHistory = false;
 
+  /// Ошибка загрузки истории открытого чата. Раньше в _loadFirstPage был глухой
+  /// catch (_) {} — сбой сети или 401 превращался в «пустой экран без объяснений»
+  /// (дефект №15). Теперь текст виден плашкой в ChatScreen.
+  String? loadError;
+
+  /// Человекочитаемая причина закрытия WS-сокета чата (плашка состояния из
+  /// раздела 8). Код виден только для закрытий ПОСЛЕ accept; отказы до accept
+  /// клиент различает пробным REST-запросом в WsClient (_probeAuth).
+  String? wsCloseNotice;
+
+  /// Вызывается, когда бэкенд отверг авторизацию (4001 на любом из сокетов).
+  /// Навигацией занимается подписчик (main.dart): снять толкнутые маршруты и
+  /// разлогинить — сам ChatState экраны не переключает.
+  void Function()? onSessionExpired;
+
   WsClient? _chatSocket;
   WsStatus? _wsStatus; // null — сокет чата ещё не открывался
 
@@ -61,6 +76,8 @@ class ChatState extends ChangeNotifier {
     hasMoreMessages = true;
     onlineUsers.clear();
     currentChatDetail = null;
+    loadError = null;
+    wsCloseNotice = null;
     notifyListeners();
 
     // Загружаем параллельно: первую страницу сообщений, детали чата и markRead
@@ -86,11 +103,22 @@ class ChatState extends ChangeNotifier {
   Future<void> _loadFirstPage(String chatId) async {
     try {
       final page = await _api.messages(chatId, page: 1);
+      // Страница могла прийти после смены чата — не затираем данные нового
+      if (selectedChatId != chatId) return;
       // Бэкенд уже отдал страницу по возрастанию времени (views.py: MessageSerializer(page[::-1]))
       messages = page;
       hasMoreMessages = page.length == messagesPageSize;
+      loadError = null;
       notifyListeners();
-    } catch (_) {}
+    } catch (e) {
+      if (selectedChatId != chatId) return;
+      // Больше не глушим: без этого сбоя пользователь видел пустую ленту
+      // и «ничего не происходит» (дефект №15)
+      loadError = e is ApiException
+          ? 'Не удалось загрузить историю: ${e.message}'
+          : 'Не удалось загрузить историю: нет связи с сервером';
+      notifyListeners();
+    }
   }
 
   /// Загружает детали чата (список участников, моя роль админа).
@@ -222,6 +250,8 @@ class ChatState extends ChangeNotifier {
     messages = [];
     currentChatDetail = null;
     onlineUsers.clear();
+    loadError = null;
+    wsCloseNotice = null;
     _closeChatSocket();
     notifyListeners();
   }
@@ -236,6 +266,7 @@ class ChatState extends ChangeNotifier {
   void _openChatSocket(String chatId) {
     _closeChatSocket();
     _wsStatus = WsStatus.connecting;
+    wsCloseNotice = null;
     notifyListeners();
     final socket = WsClient(
       path: 'chat/$chatId/',
@@ -304,15 +335,36 @@ class ChatState extends ChangeNotifier {
 
   /// Обрабатывает закрытие WebSocket чата.
   ///
-  /// При кодах 4003 (исключён из чата) или 4004 (чат удалён) удаляет чат из списка
-  /// и закрывает его, если он был открыт. См. раздел 5 AGENTS.md «Коды закрытия».
+  /// Ставит человекочитаемую плашку причины (wsCloseNotice). При 4003/4004
+  /// удаляет чат из списка и закрывает его, если он был открыт. При 4001 —
+  /// сессия невалидна, переподключаться бессмысленно: инициируем возврат к
+  /// экрану входа через onSessionExpired. См. раздел 5 AGENTS.md «Коды закрытия».
   void _handleChatClose(int? code) {
     _wsStatus = WsStatus.disconnected;
+    wsCloseNotice = _closeNotice(code);
+    if (code == 4001) {
+      notifyListeners();
+      onSessionExpired?.call();
+      return;
+    }
     if (code == 4003 || code == 4004) {
       if (selectedChatId != null) removeChat(selectedChatId!);
     }
     notifyListeners();
   }
+
+  /// Тексты причин закрытия сокета для шапки чата. null code — обрыв сети или
+  /// сервера: это НЕ отказ до accept (те приходят без кода и различаются
+  /// пробным запросом в WsClient), поэтому честно говорим «переподключаемся».
+  String? _closeNotice(int? code) => switch (code) {
+    null => 'Соединение потеряно, переподключаемся...',
+    4001 => 'Сессия истекла — войдите заново',
+    4003 => 'Вы больше не участник чата',
+    4004 => 'Чат удалён',
+    4009 => 'Слишком много открытых соединений',
+    4029 => 'Слишком частые переподключения',
+    _ => null,
+  };
 
   /// Вызывается после успешного переподключения сокета (не первого подключения!).
   ///
@@ -333,6 +385,7 @@ class ChatState extends ChangeNotifier {
   /// ниоткуда (дефект №3), теперь он подключён в _openChatSocket через колбэк onOpen.
   void setConnected() {
     _wsStatus = WsStatus.connected;
+    wsCloseNotice = null; // соединение живое — плашка причины больше не нужна
     notifyListeners();
   }
 
@@ -345,6 +398,12 @@ class ChatState extends ChangeNotifier {
     final socket = WsClient(
       path: 'notifications/',
       onEvent: _handleNotification,
+      // Мёртвая сессия на личном канале — тот же случай, что и 4001 на канале
+      // чата: без этой ветки приложение висело бы на устаревших экранах с
+      // вечно переподключающимся сокетом (дефект №16).
+      onClose: (code) {
+        if (code == 4001) onSessionExpired?.call();
+      },
     );
     _notificationsSocket = socket;
     socket.connect();
@@ -423,6 +482,8 @@ class ChatState extends ChangeNotifier {
     messagesPage = 1;
     hasMoreMessages = true;
     isLoadingHistory = false;
+    loadError = null;
+    wsCloseNotice = null;
     
     notifyListeners();
   }

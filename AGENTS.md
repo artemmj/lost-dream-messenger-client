@@ -5,8 +5,8 @@
 
 ## 1. Что это за проект
 
-Клиент к Django-бэкенду [`lost-dream-messenger`](../lost-dream-messenger) (монорепозиторий:
-Django в корне, Vue-фронтенд в `frontend/`). Бэкенд — **единственный источник правды о контракте**.
+Клиент к Django-бэкенду [`lost-dream-messenger-server`](../lost-dream-messenger-server)
+(монорепозиторий: Django в корне, Vue-фронтенд в `frontend/`). Бэкенд — **единственный источник правды о контракте**.
 Любые сомнения о формате ответа, статус-коде, имени поля или кадре WebSocket решаются чтением
 исходников бэкенда (`messenger/views.py`, `messenger/serializers.py`, `messenger/consumers.py`,
 `messenger/routing.py`, `messenger/ratelimit.py`, `config/asgi.py`, `config/settings.py`), а не
@@ -21,9 +21,12 @@ Hilt, Retrofit + kotlinx.serialization, OkHttp WebSocket, DataStore). Оно у�
 
 Текущее состояние: **прототип**. Компилируется, основной сценарий «войти → список чатов → открыть
 чат → отправить / получить» работает, в том числе real-time. Критичные дефекты №1–№7 и дебаунс
-поиска (№8) исправлены, блок «Гигиена» (№17–№20) закрыт, а также №25 (отображаемые имена)
-и №28–№29 (стабильность WS: самоблокировка переподключений, теряющиеся отправки, незакрытый
-хвост №3); остаются открытые дефекты №9–№16, №21–№24 и №26–№27 (см. раздел 7).
+поиска (№8) исправлены, блок «Гигиена» (№17–№20) закрыт, а также №25 (отображаемые имена),
+№28–№29 (стабильность WS: самоблокировка переподключений, теряющиеся отправки, незакрытый
+хвост №3) и №16 (оживление сессии: refresh токена перед WS-handshake, пробный REST-запрос после
+серии невидимых отказов, возврат к экрану входа по 4001); в №15 закрыта самая заметная часть
+(ошибка загрузки истории показывается в чате). Остаются открытые дефекты №9–№15, №21–№24
+и №26–№27 (см. раздел 7).
 
 ## 2. Окружение и команды
 
@@ -52,7 +55,9 @@ flutter run -d <device>  # хост бэкенда правится в lib/confi
 ```
 lib/
 ├── config.dart                  # AppConfig: host, apiBase (http://host/api/v1), wsBase (ws://host/ws)
-├── main.dart                    # MultiProvider(AuthState, ChatState) → MaterialApp → _Boot
+├── main.dart                    # AuthState+ChatState создаются в main(), там же wiring
+│                                # chat.onSessionExpired (4001 → popUntil + logout через navigatorKey)
+│                                # → MultiProvider(.value) → MaterialApp → _Boot
 │                                # _Boot: bootstrap(), далее выбор экрана через watch<AuthState>
 │                                # (isAuthenticated ? ChatsScreen : LoginScreen) — без ручной навигации
 ├── models/                      # Плоские DTO с фабриками fromJson, без codegen
@@ -63,23 +68,28 @@ lib/
 │                                # ChatMember(user, isAdmin), ChatDetail(members, myIsAdmin)
 ├── services/
 │   ├── api.dart                 # Api — синглтон. _request(method, path): 401 → refresh → один повтор.
-│   │                            # ApiException(statusCode, message), _extractError — DRF detail / {field:[...]}
+│   │                            # ApiException(statusCode, message), _extractError — DRF detail / {field:[...]};
+│   │                            # ensureFreshAccess() — refresh по JWT exp перед WS-handshake (дефект №16)
 │   ├── token_store.dart         # TokenStore: статические access/refresh/save/clear поверх SharedPreferences
 │   └── ws.dart                  # WsClient(path, onEvent, onClose, onReconnect, onOpen):
 │                                # IOWebSocketChannel + заголовок Origin, connect/ready/listen,
-│                                # isConnected = «handshake завершён» (_isOpen), реконнект —
-│                                # экспоненциальный backoff 1→60 с с джиттером,
+│                                # токен берётся через Api.ensureFreshAccess, isConnected = «handshake
+│                                # завершён» (_isOpen), реконнект — экспоненциальный backoff 1→60 с
+│                                # с джиттером, после 3 сорванных handshake без кода — пробный Api.me()
+│                                # (_probeAuth → 4001 при мёртвой сессии),
 │                                # noReconnectCodes = {4001,4003,4004,4009,4029}
 ├── state/
 │   ├── auth_state.dart          # me, loading, error; bootstrap/login/register/updateProfile/logout
 │   └── chat_state.dart          # chats, currentChatDetail, messages, selectedChatId, onlineUsers,
-│                                # wsStatus (enum WsStatus), пагинация истории; сокет чата + сокет уведомлений;
+│                                # wsStatus (enum WsStatus), loadError, wsCloseNotice, onSessionExpired,
+│                                # пагинация истории; сокет чата + сокет уведомлений;
 │                                # clearAll() — полная очистка при logout
 └── screens/
     ├── login_screen.dart        # Вход/регистрация в одном экране, переключение _isRegister;
     │                            # после входа НИКАКОЙ ручной навигации — экран решает _Boot
     ├── chats_screen.dart        # Список чатов, FAB «новый чат», иконки профиля и выхода
-    ├── chat_screen.dart         # Лента, поле ввода, шапка со статусом WS, вход в участников группы
+    ├── chat_screen.dart         # Лента, поле ввода, шапка со статусом WS / причиной закрытия сокета
+    │                            # (wsCloseNotice), плашка ошибок отправки и загрузки истории
     ├── new_chat_screen.dart     # Поиск с дебаунсом на Timer, режим «личный / групповой», чипы;
     │                            # после создания — pushReplacement на ChatScreen
     ├── group_members_screen.dart# Участники: чип «админ», удаление других (админу), выход из чата (себе)
@@ -97,8 +107,11 @@ android/ ios/ macos/ windows/ linux/ web/   # Сгенерированные `fl
 
 ## 4. Архитектура
 
-**Состояние.** Два `ChangeNotifier` в `MultiProvider` (`lib/main.dart:10-18`), оба создаются
-при старте приложения, до авторизации. Экраны читают через `context.watch<T>()` (пересборка) и
+**Состояние.** Два `ChangeNotifier` в `MultiProvider` (`lib/main.dart`), оба создаются
+в `main()` до авторизации и передаются через `ChangeNotifierProvider.value`; там же навешен
+`chat.onSessionExpired` (4001 от бэкенда → `popUntil(isFirst)` по `navigatorKey`, `clearAll()`,
+`logout()`) — иначе толкнутый ChatScreen оставался бы поверх формы входа (см. дефект №4).
+Экраны читают через `context.watch<T>()` (пересборка) и
 `context.read<T>()` (вызов методов). Отдельных ViewModel на экран нет, DI нет: `Api` — синглтон
 (`lib/services/api.dart:19-21`), `TokenStore` — статические методы.
 
@@ -132,6 +145,15 @@ WS-handshake бэкенд не читает), но заголовок `Origin` �
   закрытия, а как сорванный upgrade без кода → `catch` в `connect()` → backoff-ретрай;
   `noReconnectCodes` реально срабатывает только для закрытий **после** accept
   (например `member_removed`/`chat_deleted` в `receive`-пути consumers);
+- так как самый частый невидимый отказ — просроченный JWT (4001; access живёт 60 мин,
+  `settings.py:158`), токен перед handshake берётся через `Api.ensureFreshAccess()`
+  (парсит `exp` из payload, при истечении делает refresh), а после 3 подряд сорванных
+  handshake `_probeAuth()` выполняет пробный `GET /users/me/`: 401 → `onClose(4001)`
+  → сброс сессии и возврат к экрану входа вместо вечного «подключение...» (дефект №16).
+  Дисклеймер: симметричную блокировку «один клиент держит чат — второй не грузит» мог
+  вызывать и мусор в Redis-хеше `messenger:presence` (кап 5 соединений, переживает
+  рестарты Daphne и kill эмулятора) — это правка данных, не кода:
+  `redis-cli hgetall messenger:presence`, `hdel messenger:presence <user_id>`;
 - `isConnected` означает «handshake завершён» (флаг `_isOpen`), а не «объект канала создан»:
   `ChatState.sendMessage` при незакрытом сокете корректно уходит в REST-фолбэк (дефект №28).
 
@@ -208,11 +230,12 @@ WS-handshake бэкенд не читает), но заголовок `Origin` �
 Коды закрытия (все в таблице — отказ **до** `accept`, т.е. клиент получает сорванный HTTP
 upgrade без WS-кода; `noReconnectCodes` на них не срабатывает, и клиент выходит на
 backoff-ретрай. WS-код виден только для закрытий после accept — `member_removed`,
-`chat_deleted`, обрывы сети):
+`chat_deleted`, обрывы сети. Невидимые отказы до accept различает пробный `GET /users/me/`
+после 3 сорванных handshake подряд — см. раздел 4 и дефект №16):
 
 | Код | Причина | Реакция клиента |
 |-----|---------|-----------------|
-| 4001 | невалидный/просроченный JWT | не переподключаться |
+| 4001 | невалидный/просроченный JWT | не переподключаться; сброс сессии и возврат к экрану входа (`onSessionExpired` → `popUntil` + `logout`, дефект №16) |
 | 4003 | не участник чата / исключён | не переподключаться, `removeChat` |
 | 4004 | чат удалён | не переподключаться, `removeChat` |
 | 4009 | кап одновременных соединений (5 на пользователя) | не переподключаться |
@@ -328,13 +351,24 @@ WS-лимиты (`messenger/ratelimit.py`): сообщения 10/10 с (ина�
     но `AuthState.register` (`lib/state/auth_state.dart:53-59`) затем всё равно вызывает `login()`
     — лишний запрос в scope `auth` (10/мин). Комментарий `lib/services/api.dart:136-137`
     («Register возвращает токены?») устарел и вводит в заблуждение.
-15. **Ошибки глушатся.** `catch (_) {}` в `lib/state/chat_state.dart:49,93,103,129,146,164`,
-    `lib/state/auth_state.dart:23`, `lib/screens/new_chat_screen.dart:60`: ни офлайн, ни 429,
-    ни 403 не доходят до UI — экран выглядит пустым или устаревшим.
-16. **Нет обработки смены токена и сессии в живых сокетах.** При 4001 (`_closedByUser == false`,
-    код в `noReconnectCodes`) клиент просто молчит, сессия не сбрасывается и экраны не возвращаются
-    к логину. При переподключении токен перечитывается из `TokenStore` — это ок, но живой сокет
-    с истёкшим токеном ничего не инициирует. Часть про шторм переподключений закрыта в №29.
+15. **Ошибки глушатся.** ⚠️ **ИСПРАВЛЕНО ЧАСТИЧНО**. Самое заметное заделано: ошибка
+    загрузки истории (`ChatState._loadFirstPage`) больше не прячется в `catch (_) {}` —
+    ложится в `loadError` и показывается плашкой в `ChatScreen` (раньше сбой сети/401
+    выглядел как «пустой экран и ничего не происходит», симптом двух эмуляторов).
+    Остальные тихие catch остались: `ChatState.loadChats` / `loadChatDetails` /
+    `loadOlderMessages` / `markRead`, `AuthState.bootstrap`, поиск в `new_chat_screen` —
+    ни офлайн, ни 429, ни 403 там до UI не доходят.
+16. **Нет обработки смены токена и сессии в живых сокетах.** ✅ **ИСПРАВЛЕНО**.
+    Симптом на двух эмуляторах («история грузится только на одном клиенте, после закрытия
+    чата блокировка переходит другому») — это невидимый отказ WS-handshake: отказ до
+    `accept` приходит без WS-кода, а access-токен живёт 60 мин (`settings.py:158`).
+    Три правки: (1) токен перед handshake берётся через `Api.ensureFreshAccess()` —
+    парсит `exp` из JWT и делает refresh до подключения; (2) после 3 сорванных handshake
+    без кода `WsClient._probeAuth()` дёргает `GET /users/me/` — если сессия мертва,
+    сигналим `onClose(4001)`; (3) `ChatState.onSessionExpired` (wiring в `main.dart`)
+    снимает маршруты через `navigatorKey.popUntil`, делает `clearAll()` и `logout()` —
+    экран входа вместо вечного «подключение...». Если симптом вернётся — проверить
+    фантомные счётчики в Redis `messenger:presence` (см. раздел 4).
 28. **Исчезающие отправки при переподключении сокета.** ✅ **ИСПРАВЛЕНО**. `WsClient.isConnected`
    возвращал `_channel != null`, но канал присваивается **до** `await ready` — в фазе подключения
    и ретраев `ChatState.sendMessage` (`lib/state/chat_state.dart:160`) считал сокет живым, писал
@@ -420,9 +454,9 @@ WS-лимиты (`messenger/ratelimit.py`): сообщения 10/10 с (ина�
   «N в сети из M», `last_seen` («был в сети …»);
 - пагинация списка чатов и корректный `next` в истории;
 - оптимистичная отправка и очередь сообщений при обрыве связи;
-- плашки состояния: индикатор соединения в списке чатов, человекочитаемые причины закрытия сокета
-  (4003 «вы больше не участник», 4004 «чат удалён», 4029 «слишком частые переподключения») —
-  в Kotlin-версии это `closeNotice(code)`;
+- плашки состояния: человекочитаемые причины закрытия сокета в шапке чата сделаны
+  (`ChatState.wsCloseNotice`, дефект №16; в Kotlin-версии это `closeNotice(code)`); не хватает
+  индикатора соединения в списке чатов и текста error-кадров бэкенда (дефект №9);
 - пустые состояния и скелетоны загрузки (сейчас `CircularProgressIndicator` только в списке
   участников и при дозагрузке истории);
 - поиск по истории, пересылка, вложения — на бэкенде этого тоже нет;
@@ -450,9 +484,10 @@ WS-лимиты (`messenger/ratelimit.py`): сообщения 10/10 с (ина�
 ## 10. Порядок работ, если доводить до рабочего состояния
 
 1. ~~Дефекты №1–№3~~ ✅; ~~№4–№7~~ ✅; ~~№8 (дебаунс)~~ ✅ — критичный блок закрыт полностью.
-2. №9–№15 и остаток №16 (сброс сессии при 4001) — поведение под нагрузкой и обратная связь:
-   error-кадры, пагинация, скролл, всплывающие ошибки, системный «назад» (`PopScope`), лишний
-   login при регистрации; reconnect-шторм и теряющиеся отправки закрыты в №28–№29.
+2. №9–№14 и остаток №15 (тихие catch вне загрузки истории) — поведение под нагрузкой и
+   обратная связь: error-кадры, пагинация, скролл, системный «назад» (`PopScope`), лишний
+   login при регистрации; ~~reconnect-шторм и теряющиеся отправки~~ ✅ (№28–№29);
+   ~~№16 (оживление сессии при 4001)~~ ✅.
 3. ~~№17–№20 (гигиена)~~ ✅ — анализатор, тест, мёртвый код, enum'ы.
 4. №21–№24 — платформенные конфиги, если нужны не-Android цели; ~~№25 (имена)~~ ✅, кроме
    идентификаторов сборки (осознанно отложены — см. текст дефекта).

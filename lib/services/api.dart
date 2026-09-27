@@ -101,6 +101,43 @@ class Api {
     return false;
   }
 
+  /// Возвращает заведомо живой access-токен, обновив пару JWT при истечении.
+  ///
+  /// Нужен WebSocket-клиенту: у бэкенда ACCESS_TOKEN_LIFETIME — 60 минут, а
+  /// отказ 4001 приходит до accept handshake: клиент не видит WS-код и ретраит
+  /// вечно (дефект №16). REST-запросы чинят токен сами на 401, но WS-handshake
+  /// идёт мимо REST — поэтому токен проверяется до подключения здесь.
+  /// Возвращает null, если refresh не принят (токены стёрты — сессии больше нет).
+  Future<String?> ensureFreshAccess() async {
+    final token = await TokenStore.access;
+    if (token == null) return null;
+    if (!_jwtExpired(token)) return token;
+    final ok = await _refreshToken();
+    if (!ok) {
+      await TokenStore.clear();
+      return null;
+    }
+    return TokenStore.access;
+  }
+
+  /// True, если у JWT истёк срок (claim exp) или до истечения меньше 5 секунд
+  /// (handshake ещё идёт, а сервер проверит токен в своём темпе).
+  /// Неразбираемый токен считаем живым: решение за сервером.
+  bool _jwtExpired(String token) {
+    try {
+      final payload = token.split('.')[1];
+      final claims = jsonDecode(
+          utf8.decode(base64Url.decode(base64Url.normalize(payload))))
+          as Map<String, dynamic>;
+      final exp = claims['exp'];
+      if (exp is! int) return false;
+      final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      return exp <= nowSec + 5;
+    } catch (_) {
+      return false;
+    }
+  }
+
   // ---------- AUTH ----------
 
   Future<Map<String, dynamic>> login(String phone, String password) async {

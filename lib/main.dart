@@ -5,24 +5,46 @@ import 'state/chat_state.dart';
 import 'screens/login_screen.dart';
 import 'screens/chats_screen.dart';
 
+// Ключ навигатора нужен для сброса сессии по 4001: без него не снять
+// толкнутые поверх _Boot маршруты (ChatScreen, участники группы, новый чат),
+// и экран остался бы поверх перестроенного _Boot с формой входа (см. дефект №4).
+final _navigatorKey = GlobalKey<NavigatorState>();
+
 void main() {
+  final auth = AuthState();
+  final chat = ChatState();
+
+  // Бэкенд отверг авторизацию (4001 на канале чата или уведомлений):
+  // снимаем все маршруты поверх home и разлогиниваем — _Boot через
+  // watch<AuthState> сам покажет LoginScreen. ChatState.clearAll закрывает
+  // оба сокета, чтобы мёртвая сессия не порождала новые ретраи.
+  chat.onSessionExpired = () {
+    _navigatorKey.currentState?.popUntil((route) => route.isFirst);
+    chat.clearAll();
+    auth.logout();
+  };
+
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => AuthState()),
-        ChangeNotifierProvider(create: (_) => ChatState()),
+        ChangeNotifierProvider.value(value: auth),
+        ChangeNotifierProvider.value(value: chat),
       ],
-      child: const MessengerApp(),
+      child: MessengerApp(navigatorKey: _navigatorKey),
     ),
   );
 }
 
 class MessengerApp extends StatelessWidget {
-  const MessengerApp({super.key});
+  /// Опционален: в тестах навигация при сбросе сессии не проверяется,
+  /// MaterialApp работает и с null-ключом.
+  final GlobalKey<NavigatorState>? navigatorKey;
+  const MessengerApp({this.navigatorKey, super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: navigatorKey,
       title: 'Мессенджер',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),

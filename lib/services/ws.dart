@@ -7,6 +7,7 @@ import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/status.dart' as ws_status;
 import '../config.dart';
+import 'api.dart';
 import 'token_store.dart';
 
 // Коды закрытия, при которых повторное подключение бессмысленно:
@@ -46,6 +47,13 @@ class WsClient {
   int _retryCount = 0;
   final math.Random _rng = math.Random();
 
+  // Сколько сорванных handshake без кода подряд накопилось. После
+  // _probeAfter штук добавляется пробный REST-запрос: отказы до accept
+  // (4001/4009/4029) приходят как неудачный upgrade БЕЗ WS-кода, и без
+  // проверки клиент с мёртвой сессией ретраил бы вечно (дефект №16).
+  int _handshakeFailures = 0;
+  static const _probeAfter = 3;
+
   WsClient({
     required this.path,
     required this.onEvent,
@@ -65,9 +73,20 @@ class WsClient {
   /// CORS_ALLOWED_ORIGINS и ALLOWED_HOSTS на бэкенде.
   Future<void> connect() async {
     _closedByUser = false;
-    final token = await TokenStore.access;
+    // Токен берём «освежённым»: просроченный JWT бэкенд отклоняет до accept,
+    // клиент не видит кода закрытия и уходит в вечный backoff (дефект №16,
+    // симптом на двух эмуляторах: «история грузится только на одном»).
+    // ensureFreshAccess сам сделает refresh; при сетевой ошибке fallback —
+    // пробуем с сохранённым токеном, вдруг он ещё жив.
+    String? token;
+    try {
+      token = await Api().ensureFreshAccess();
+    } catch (_) {
+      token = await TokenStore.access;
+    }
     if (token == null) {
-      // Нет токена — сразу сообщаем о закрытии с кодом «неавторизован»
+      // Нет токена (или refresh не принят — сессия сброшена) — сообщаем
+      // подписчику о закрытии с кодом «неавторизован»
       onClose?.call(4001);
       return;
     }
@@ -91,6 +110,7 @@ class WsClient {
       // и в него можно писать (см. флаг _isOpen).
       _isOpen = true;
       _retryCount = 0; // backoff сбрасывается после успешного подключения
+      _handshakeFailures = 0;
 
       // onOpen вызываем ПЕРЕД onReconnect: UI сначала получает статус
       // 'connected' (setConnected в ChatState), и только потом идёт
@@ -127,6 +147,37 @@ class WsClient {
       // в реконнект с backoff'ом (см. _scheduleReconnect).
       _isOpen = false;
       _channel = null;
+      _handshakeFailures++;
+      if (_handshakeFailures >= _probeAfter) {
+        // Серия отказов без кода — проверяем, жива ли сессия
+        // (возможно, это 4001 из-за истёкшего токена), и только потом ретраим.
+        await _probeAuth();
+        return;
+      }
+      _scheduleReconnect();
+    }
+  }
+
+  /// Пробный аутентифицированный REST-запрос после серии невидимых отказов
+  /// handshake. Api.me() на 401 сам обновит токен и повторит запрос; если
+  /// refresh не принят — токены стёрты, и это мёртвая сессия: сигнализируем
+  /// onClose(4001), чтобы UI вернулся к экрану входа вместо вечного
+  /// «подключение...». Сетевые сбои сессию не трогают — продолжаем backoff.
+  Future<void> _probeAuth() async {
+    _handshakeFailures = 0;
+    try {
+      await Api().me();
+      _scheduleReconnect();
+    } on ApiException catch (e) {
+      if (e.statusCode == 401) {
+        // 4001 в noReconnectCodes — переподключение бессмысленно,
+        // реконнект не планируем
+        onClose?.call(4001);
+        return;
+      }
+      _scheduleReconnect();
+    } catch (_) {
+      // Сервер/сеть недоступны — не признак мёртвой сессии
       _scheduleReconnect();
     }
   }
