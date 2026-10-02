@@ -94,6 +94,7 @@ lib/
 │   │                            # ApiException(statusCode, message), _extractError (DRF detail / {field:[…]});
 │   │                            # ensureFreshAccess() — refresh по claim exp перед WS-handshake (№16);
 │   │                            # renameChat/deleteChat/addMember вернулись из мёртвого кода с UI (№19)
+│   ├── notification_service.dart# Firebase token lifecycle, Android channels, local display и tap payload
 │   ├── token_store.dart         # TokenStore: статические access/refresh/save/clear поверх SharedPreferences
 │   └── ws.dart                  # WsClient(path, onEvent, onClose, onReconnect, onOpen):
 │                                # IOWebSocketChannel + Origin; connect() с guard _connecting → _handshake();
@@ -649,7 +650,7 @@ WS-лимиты (`messenger/ratelimit.py`): сообщения 10/10 с → ка
 
 Вообще не предусмотрено ни клиентом, ни бэкендом: оптимистичная отправка и очередь сообщений при
 обрыве, «печатает…», пересылка, вложения (MEDIA_* на бэкенде заданы, но media не раздаётся),
-редактирование/удаление отдельного сообщения, push-уведомления, локализация, поиск по истории,
+редактирование/удаление отдельного сообщения, push для iOS/web, локализация, поиск по истории,
 темы (кроме seed Material 3), deep links, CI.
 
 ## 10. Технологический долг

@@ -1,6 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
+
 import '../models/me.dart';
 import '../services/api.dart';
+import '../services/notification_service.dart';
 import '../services/token_store.dart';
 
 class AuthState extends ChangeNotifier {
@@ -15,9 +19,8 @@ class AuthState extends ChangeNotifier {
 
   /// Человекочитаемый текст ошибки: сообщение бэкенда из ApiException либо
   /// «нет связи» для сетевых исключений (дефект №15).
-  static String _describe(Object e) => e is ApiException
-      ? e.message
-      : 'Нет связи с сервером';
+  static String _describe(Object e) =>
+      e is ApiException ? e.message : 'Нет связи с сервером';
 
   /// Восстанавливает сессию из сохранённых токенов при старте.
   ///
@@ -29,6 +32,7 @@ class AuthState extends ChangeNotifier {
     if (token == null) return false;
     try {
       _me = await Api().me();
+      unawaited(NotificationService.syncDeviceToken());
       notifyListeners();
       return true;
     } catch (e) {
@@ -42,10 +46,13 @@ class AuthState extends ChangeNotifier {
   }
 
   Future<bool> login(String phone, String password) async {
-    _loading = true; _error = null; notifyListeners();
+    _loading = true;
+    _error = null;
+    notifyListeners();
     try {
       await Api().login(phone, password);
       _me = await Api().me();
+      unawaited(NotificationService.syncDeviceToken());
       return true;
     } catch (e) {
       // Не только ApiException: SocketException при офлайне раньше вылетал
@@ -53,7 +60,8 @@ class AuthState extends ChangeNotifier {
       _error = _describe(e);
       return false;
     } finally {
-      _loading = false; notifyListeners();
+      _loading = false;
+      notifyListeners();
     }
   }
 
@@ -65,22 +73,30 @@ class AuthState extends ChangeNotifier {
     String? firstName,
     String? lastName,
   }) async {
-    _loading = true; _error = null; notifyListeners();
+    _loading = true;
+    _error = null;
+    notifyListeners();
     try {
       // Api.register уже сохранил пару JWT из ответа (201 {user, access,
       // refresh}), поэтому отдельный login не нужен: он дублировал запрос
       // и жёг лимит scope `auth` — 10/мин (дефект №14).
       await Api().register(
-        phone: phone, password: password, passwordConfirm: passwordConfirm,
-        email: email, firstName: firstName, lastName: lastName,
+        phone: phone,
+        password: password,
+        passwordConfirm: passwordConfirm,
+        email: email,
+        firstName: firstName,
+        lastName: lastName,
       );
       _me = await Api().me();
+      unawaited(NotificationService.syncDeviceToken());
       return true;
     } catch (e) {
       _error = _describe(e);
       return false;
     } finally {
-      _loading = false; notifyListeners();
+      _loading = false;
+      notifyListeners();
     }
   }
 
@@ -112,6 +128,7 @@ class AuthState extends ChangeNotifier {
   /// показывается плашкой на экране входа: без неё возврат к логину выглядит
   /// как произвольный сброс (дефект №15).
   Future<void> logout({String? reason}) async {
+    await NotificationService.revokeDeviceToken();
     await TokenStore.clear();
     _me = null;
     _error = reason;

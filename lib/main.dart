@@ -1,5 +1,9 @@
+import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+
+import 'services/notification_service.dart';
 import 'state/auth_state.dart';
 import 'state/chat_state.dart';
 import 'screens/login_screen.dart';
@@ -10,7 +14,17 @@ import 'screens/chats_screen.dart';
 // и экран остался бы поверх перестроенного _Boot с формой входа (см. дефект №4).
 final _navigatorKey = GlobalKey<NavigatorState>();
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  if (defaultTargetPlatform == TargetPlatform.android) {
+    try {
+      await Firebase.initializeApp();
+      await NotificationService.initialize();
+    } catch (error) {
+      debugPrint('Firebase push initialization failed: $error');
+    }
+  }
+
   final auth = AuthState();
   final chat = ChatState();
 
@@ -33,9 +47,8 @@ void main() {
   chat.onNotice = (message) {
     final context = _navigatorKey.currentContext;
     if (context == null) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   };
 
   // ChatState нужен мой id, чтобы отличать своё прочтение от чужого в кадре

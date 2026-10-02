@@ -1,5 +1,7 @@
 import 'dart:convert';
+
 import 'package:http/http.dart' as http;
+
 import '../config.dart';
 import '../models/chat.dart';
 import '../models/me.dart';
@@ -61,10 +63,18 @@ class Api {
         res = await http.get(uri, headers: headers);
         break;
       case 'POST':
-        res = await http.post(uri, headers: headers, body: jsonEncode(body ?? {}));
+        res = await http.post(
+          uri,
+          headers: headers,
+          body: jsonEncode(body ?? {}),
+        );
         break;
       case 'PATCH':
-        res = await http.patch(uri, headers: headers, body: jsonEncode(body ?? {}));
+        res = await http.patch(
+          uri,
+          headers: headers,
+          body: jsonEncode(body ?? {}),
+        );
         break;
       case 'DELETE':
         res = await http.delete(uri, headers: headers);
@@ -76,7 +86,13 @@ class Api {
     if (res.statusCode == 401 && auth && retryOn401) {
       final ok = await _refreshToken();
       if (ok) {
-        return _request(method, path, body: body, auth: auth, retryOn401: false);
+        return _request(
+          method,
+          path,
+          body: body,
+          auth: auth,
+          retryOn401: false,
+        );
       } else {
         await TokenStore.clear();
       }
@@ -127,8 +143,8 @@ class Api {
     try {
       final payload = token.split('.')[1];
       final claims = jsonDecode(
-          utf8.decode(base64Url.decode(base64Url.normalize(payload))))
-          as Map<String, dynamic>;
+        utf8.decode(base64Url.decode(base64Url.normalize(payload))),
+      ) as Map<String, dynamic>;
       final exp = claims['exp'];
       if (exp is! int) return false;
       final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -141,9 +157,15 @@ class Api {
   // ---------- AUTH ----------
 
   Future<Map<String, dynamic>> login(String phone, String password) async {
-    final res = await _request('POST', '/auth/login/',
-        body: {'phone': phone, 'password': password}, auth: false);
-    if (res.statusCode != 200) throw ApiException(res.statusCode, _extractError(res));
+    final res = await _request(
+      'POST',
+      '/auth/login/',
+      body: {'phone': phone, 'password': password},
+      auth: false,
+    );
+    if (res.statusCode != 200) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
     final data = jsonDecode(res.body);
     await TokenStore.save(data['access'], data['refresh']);
     return data;
@@ -163,12 +185,20 @@ class Api {
       'password_confirm': passwordConfirm,
     };
     if (email != null && email.isNotEmpty) body['email'] = email;
-    if (firstName != null && firstName.isNotEmpty) body['first_name'] = firstName;
+    if (firstName != null && firstName.isNotEmpty) {
+      body['first_name'] = firstName;
+    }
     if (lastName != null && lastName.isNotEmpty) body['last_name'] = lastName;
 
-    final res = await _request('POST', '/auth/register/',
-        body: body, auth: false);
-    if (res.statusCode != 201) throw ApiException(res.statusCode, _extractError(res));
+    final res = await _request(
+      'POST',
+      '/auth/register/',
+      body: body,
+      auth: false,
+    );
+    if (res.statusCode != 201) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
     // Бэкенд отдаёт пару JWT сразу (views.py RegisterView.create), поэтому
     // отдельный login после регистрации не нужен — он лишь жгёт лимит scope
     // `auth` (10/мин). См. дефект №14.
@@ -180,20 +210,50 @@ class Api {
 
   Future<Me> me() async {
     final res = await _request('GET', '/users/me/');
-    if (res.statusCode != 200) throw ApiException(res.statusCode, _extractError(res));
+    if (res.statusCode != 200) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
     return Me.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
   }
 
   Future<Me> updateMe(Map<String, dynamic> payload) async {
     final res = await _request('PATCH', '/users/me/', body: payload);
-    if (res.statusCode != 200) throw ApiException(res.statusCode, _extractError(res));
+    if (res.statusCode != 200) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
     return Me.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
   }
 
+  Future<void> registerDeviceToken(String token) async {
+    final res = await _request(
+      'POST',
+      '/devices/',
+      body: {'token': token, 'platform': 'android'},
+    );
+    if (res.statusCode != 200) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
+  }
+
+  Future<void> revokeDeviceToken(String token) async {
+    final res = await _request(
+      'POST',
+      '/devices/revoke/',
+      body: {'token': token},
+    );
+    if (res.statusCode != 204) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
+  }
+
   Future<List<User>> searchUsers(String query) async {
-    final res = await _request('GET',
-        '/users/search/?q=${Uri.encodeQueryComponent(query)}');
-    if (res.statusCode != 200) throw ApiException(res.statusCode, _extractError(res));
+    final res = await _request(
+      'GET',
+      '/users/search/?q=${Uri.encodeQueryComponent(query)}',
+    );
+    if (res.statusCode != 200) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
     final data = jsonDecode(utf8.decode(res.bodyBytes));
     return (data['results'] as List).map((j) => User.fromJson(j)).toList();
   }
@@ -202,20 +262,29 @@ class Api {
 
   Future<List<ChatListItem>> listChats({int page = 1}) async {
     final res = await _request('GET', '/chats/?page=$page');
-    if (res.statusCode != 200) throw ApiException(res.statusCode, _extractError(res));
+    if (res.statusCode != 200) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
     final data = jsonDecode(utf8.decode(res.bodyBytes));
-    return (data['results'] as List).map((j) => ChatListItem.fromJson(j)).toList();
+    return (data['results'] as List)
+        .map((j) => ChatListItem.fromJson(j))
+        .toList();
   }
 
   Future<ChatDetail> chatDetail(String chatId) async {
     final res = await _request('GET', '/chats/$chatId/');
-    if (res.statusCode != 200) throw ApiException(res.statusCode, _extractError(res));
+    if (res.statusCode != 200) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
     return ChatDetail.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
   }
 
   Future<ChatDetail> createPrivateChat(String interlocutorId) async {
-    final res = await _request('POST', '/chats/private/',
-        body: {'interlocutor_id': interlocutorId});
+    final res = await _request(
+      'POST',
+      '/chats/private/',
+      body: {'interlocutor_id': interlocutorId},
+    );
     if (res.statusCode != 200 && res.statusCode != 201) {
       throw ApiException(res.statusCode, _extractError(res));
     }
@@ -226,19 +295,27 @@ class Api {
     required String name,
     required List<String> memberIds,
   }) async {
-    final res = await _request('POST', '/chats/', body: {
-      'type': 'GROUP',
-      'name': name,
-      'member_ids': memberIds,
-    });
-    if (res.statusCode != 201) throw ApiException(res.statusCode, _extractError(res));
+    final res = await _request(
+      'POST',
+      '/chats/',
+      body: {'type': 'GROUP', 'name': name, 'member_ids': memberIds},
+    );
+    if (res.statusCode != 201) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
     return ChatDetail.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
   }
 
   /// Переименование GROUP-чата. Только админ (остальным 403), не-GROUP → 400.
   Future<ChatDetail> renameChat(String chatId, String name) async {
-    final res = await _request('PATCH', '/chats/$chatId/', body: {'name': name});
-    if (res.statusCode != 200) throw ApiException(res.statusCode, _extractError(res));
+    final res = await _request(
+      'PATCH',
+      '/chats/$chatId/',
+      body: {'name': name},
+    );
+    if (res.statusCode != 200) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
     return ChatDetail.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
   }
 
@@ -246,37 +323,59 @@ class Api {
   /// участник. Остальным сервер сам разнесёт `chat_deleted` и закрытие 4004.
   Future<void> deleteChat(String chatId) async {
     final res = await _request('DELETE', '/chats/$chatId/');
-    if (res.statusCode != 204) throw ApiException(res.statusCode, _extractError(res));
+    if (res.statusCode != 204) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
   }
 
   Future<MessagePage> messages(String chatId, {int page = 1}) async {
     final res = await _request('GET', '/chats/$chatId/messages/?page=$page');
-    if (res.statusCode != 200) throw ApiException(res.statusCode, _extractError(res));
+    if (res.statusCode != 200) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
     return MessagePage.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
   }
 
   Future<Message> sendMessage(String chatId, String text) async {
-    final res = await _request('POST', '/chats/$chatId/send/', body: {'text': text});
-    if (res.statusCode != 201) throw ApiException(res.statusCode, _extractError(res));
+    final res = await _request(
+      'POST',
+      '/chats/$chatId/send/',
+      body: {'text': text},
+    );
+    if (res.statusCode != 201) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
     return Message.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
   }
 
   Future<void> markRead(String chatId) async {
     final res = await _request('POST', '/chats/$chatId/read/');
-    if (res.statusCode != 200) throw ApiException(res.statusCode, _extractError(res));
+    if (res.statusCode != 200) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
   }
 
   /// Добавление участника в GROUP-чат. Только админ (остальным 403),
   /// в личный чат — 400, уже состоящий — 400.
   Future<void> addMember(String chatId, String userId) async {
-    final res = await _request('POST', '/chats/$chatId/add-member/',
-        body: {'user_id': userId});
-    if (res.statusCode != 201) throw ApiException(res.statusCode, _extractError(res));
+    final res = await _request(
+      'POST',
+      '/chats/$chatId/add-member/',
+      body: {'user_id': userId},
+    );
+    if (res.statusCode != 201) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
   }
 
   Future<void> removeMember(String chatId, String userId) async {
-    final res = await _request('POST', '/chats/$chatId/remove-member/',
-        body: {'user_id': userId});
-    if (res.statusCode != 200) throw ApiException(res.statusCode, _extractError(res));
+    final res = await _request(
+      'POST',
+      '/chats/$chatId/remove-member/',
+      body: {'user_id': userId},
+    );
+    if (res.statusCode != 200) {
+      throw ApiException(res.statusCode, _extractError(res));
+    }
   }
 }

@@ -14,6 +14,10 @@ dependencies:
   web_socket_channel: ^3.0.0   # WS
   provider: ^6.1.0             # управление состоянием
   shared_preferences: ^2.2.0   # хранение JWT
+  firebase_core: ^3.15.2
+  flutter_local_notifications: ^18.0.1
+  firebase_messaging: ^15.1.0
+  timezone: ^0.9.4             # для планирования по времени
   
 dev_dependencies:
   flutter_test:

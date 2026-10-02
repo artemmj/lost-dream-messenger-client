@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
+
 import '../models/chat.dart';
 import '../models/message.dart';
 import '../services/api.dart';
+import '../services/notification_service.dart';
 import '../services/ws.dart';
 
 /// PAGE_SIZE бэкенда: полная страница означает, что пропущенных сообщений
@@ -89,9 +93,8 @@ class ChatState extends ChangeNotifier {
   /// Превращает исключение сетевого слоя в человекочитаемый текст (дефект №15):
   /// ApiException уже несёт сообщение бэкенда на нужном языке, всё остальное
   /// (SocketException, таймаут) — «нет связи с сервером».
-  static String _describe(String what, Object e) => e is ApiException
-      ? '$what: ${e.message}'
-      : '$what: нет связи с сервером';
+  static String _describe(String what, Object e) =>
+      e is ApiException ? '$what: ${e.message}' : '$what: нет связи с сервером';
 
   ChatListItem? get selectedChat {
     if (selectedChatId == null) return null;
@@ -338,12 +341,17 @@ class ChatState extends ChangeNotifier {
   /// Если чат не найден в списке (удалили из другого места), перезагружает весь список.
   void applyRename(String chatId, String name) {
     final idx = chats.indexWhere((c) => c.id == chatId);
-    if (idx == -1) { loadChats(); return; }
+    if (idx == -1) {
+      loadChats();
+      return;
+    }
     chats[idx] = chats[idx].copyWith(name: name);
     if (currentChatDetail?.id == chatId) {
       currentChatDetail = ChatDetail(
-        id: currentChatDetail!.id, type: currentChatDetail!.type,
-        name: name, members: currentChatDetail!.members,
+        id: currentChatDetail!.id,
+        type: currentChatDetail!.type,
+        name: name,
+        members: currentChatDetail!.members,
         myIsAdmin: currentChatDetail!.myIsAdmin,
       );
     }
@@ -656,7 +664,13 @@ class ChatState extends ChangeNotifier {
   /// поднимает канал заново на visibilitychange (handleVisibility в
   /// useNotificationsSocket.ts), мобильный аналог — AppLifecycleState.resumed:
   /// без этого приложение, вернувшись из фона, навсегда оставалось без бейджей.
-  void ensureNotificationsSocket() => _notificationsSocket?.revive();
+  void ensureNotificationsSocket() {
+    if (_notificationsSocket == null) {
+      openNotificationsSocket();
+    } else {
+      _notificationsSocket!.revive();
+    }
+  }
 
   void _handleNotification(Map<String, dynamic> event) {
     final type = event['type'];
@@ -679,6 +693,29 @@ class ChatState extends ChangeNotifier {
         // делались оба действия сразу — unread_count перезаписывался нулём
         // из markRead, а в фоне курсор читался сам собой.
         final opened = chatId == selectedChatId && isForeground;
+        if (!opened && msg != null) {
+          final chatItem = chats[idx];
+          final sender = msg.sender.displayName;
+          final title = chatItem.type == ChatType.private
+              ? sender
+              : '${chatItem.displayName} · $sender';
+          final channelId = chatItem.type == ChatType.private
+              ? NotificationService.highChannelId
+              : NotificationService.lowChannelId;
+          final unreadCount = event['unread_count'] as int? ?? 1;
+          final body = unreadCount > 1
+              ? '${msg.text} · ещё ${unreadCount - 1}'
+              : msg.text;
+          unawaited(
+            NotificationService.showChatMessage(
+              chatId: chatId,
+              messageId: msg.id,
+              title: title,
+              body: body,
+              channelId: channelId,
+            ),
+          );
+        }
         chats[idx] = chats[idx].copyWith(
           unreadCount: opened ? 0 : (event['unread_count'] as int? ?? 0),
           lastMessage: msg,
@@ -723,7 +760,7 @@ class ChatState extends ChangeNotifier {
     // Закрываем сокеты
     _closeChatSocket();
     closeNotificationsSocket();
-    
+
     // Очищаем всё состояние
     chats = [];
     messages = [];
@@ -738,7 +775,7 @@ class ChatState extends ChangeNotifier {
     listError = null;
     sendError = null;
     wsCloseNotice = null;
-    
+
     notifyListeners();
   }
 }
