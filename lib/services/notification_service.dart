@@ -20,12 +20,23 @@ class NotificationService {
   static StreamSubscription<String>? _tokenSubscription;
   static bool _initialized = false;
 
+  static String get _devicePlatform => switch (defaultTargetPlatform) {
+    TargetPlatform.android => 'android',
+    TargetPlatform.iOS => 'ios',
+    _ => throw UnsupportedError('Push notifications require Android or iOS'),
+  };
+
   static Future<void> initialize() async {
     if (_initialized) return;
 
     await _localNotifications.initialize(
       const InitializationSettings(
         android: AndroidInitializationSettings('ic_notification'),
+        iOS: DarwinInitializationSettings(
+          requestAlertPermission: false,
+          requestBadgePermission: false,
+          requestSoundPermission: false,
+        ),
       ),
       onDidReceiveNotificationResponse: (response) {
         _queueChatFromPayload(response.payload);
@@ -90,6 +101,19 @@ class NotificationService {
         return;
       }
 
+      if (defaultTargetPlatform == TargetPlatform.iOS) {
+        String? apnsToken;
+        for (var attempt = 0; attempt < 20; attempt++) {
+          apnsToken = await _messaging.getAPNSToken();
+          if (apnsToken != null) break;
+          await Future.delayed(const Duration(milliseconds: 250));
+        }
+        if (apnsToken == null) {
+          if (kDebugMode) debugPrint('[push] APNs token not available yet');
+          return;
+        }
+      }
+
       final token = await _messaging.getToken();
       if (token == null) {
         if (kDebugMode) debugPrint('[push] FCM returned no registration token');
@@ -138,7 +162,7 @@ class NotificationService {
         if (kDebugMode) debugPrint('[push] token not registered: no auth session');
         return;
       }
-      await Api().registerDeviceToken(token);
+      await Api().registerDeviceToken(token, platform: _devicePlatform);
       if (kDebugMode) debugPrint('[push] device token registered');
     } on ApiException catch (error) {
       if (kDebugMode) {
@@ -195,6 +219,11 @@ class NotificationService {
           importance: highImportance ? Importance.high : Importance.low,
           priority: highImportance ? Priority.high : Priority.low,
           tag: messageId,
+        ),
+        iOS: const DarwinNotificationDetails(
+          presentAlert: true,
+          presentBadge: true,
+          presentSound: true,
         ),
       ),
       payload: jsonEncode(data),

@@ -224,11 +224,14 @@ class Api {
     return Me.fromJson(jsonDecode(utf8.decode(res.bodyBytes)));
   }
 
-  Future<void> registerDeviceToken(String token) async {
+  Future<void> registerDeviceToken(
+    String token, {
+    required String platform,
+  }) async {
     final res = await _request(
       'POST',
       '/devices/',
-      body: {'token': token, 'platform': 'android'},
+      body: {'token': token, 'platform': platform},
     );
     if (res.statusCode != 200) {
       throw ApiException(res.statusCode, _extractError(res));
